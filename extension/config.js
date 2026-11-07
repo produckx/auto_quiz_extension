@@ -8,7 +8,8 @@
 
 const APP_CONFIG = {
   // Địa chỉ backend FastAPI (đổi khi chạy backend ở host/port khác)
-  BACKEND_URL: "http://127.0.0.1:8765",
+  BACKEND_URL: "https://auto-quiz-extension-one.vercel.app",
+  // BACKEND_URL: "http://127.0.0.1:8765",
 
   // Số bản ghi lịch sử / cache tối đa lưu trong chrome.storage.local
   HISTORY_LIMIT: 500,

@@ -19,6 +19,19 @@
   overflow: hidden;
   transition: all 0.25s ease-in-out;
   user-select: none;
+  cursor: grab;
+}
+
+/* Trong lúc kéo: tắt transition để widget bám chuột mượt, không bị trễ */
+#ai-quiz-floating-widget.dragging {
+  transition: none;
+  will-change: left, top;
+}
+
+#ai-quiz-floating-widget.dragging,
+#ai-quiz-floating-widget.dragging * {
+  cursor: grabbing !important;
+  user-select: none;
 }
 
 #ai-quiz-floating-widget.dark-mode {

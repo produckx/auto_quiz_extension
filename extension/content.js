@@ -654,11 +654,11 @@
     const widget = document.createElement("div");
     widget.id = "ai-quiz-floating-widget";
     widget.innerHTML = `
-      <div class="ai-widget-mini-icon" title="Mở Duck Quiz Agent">⚡</div>
+      <div class="ai-widget-mini-icon" title="Mở Duck Quiz Agent">🦆</div>
       
       <div class="ai-widget-header" id="ai-widget-drag-handle">
         <div class="ai-widget-title-area">
-          <span class="ai-widget-logo-badge">Q</span>
+          <span class="ai-widget-logo-badge">🦆</span>
           <span>Duck Quiz Agent</span>
         </div>
         <div class="ai-widget-controls">
@@ -749,22 +749,62 @@
   function setupWidgetEvents(widget) {
     const btnMinimize = widget.querySelector("#ai-widget-btn-minimize");
     const btnClose = widget.querySelector("#ai-widget-btn-close");
-    const miniIcon = widget.querySelector(".ai-widget-mini-icon");
     const btnSolve = widget.querySelector("#ai-widget-btn-solve");
     const btnAuto = widget.querySelector("#ai-widget-btn-auto");
-    const header = widget.querySelector("#ai-widget-drag-handle");
     const toggleNextPage = widget.querySelector("#ai-widget-toggle-nextpage");
     const toggleCache = widget.querySelector("#ai-widget-toggle-cache");
     const answerModeRadios = widget.querySelectorAll('input[name="ai-answer-mode"]');
 
-    // Thu nhỏ / Phóng to và ghi nhớ trạng thái giữa các lần tải trang
-    btnMinimize.addEventListener("click", () => {
+    // Vị trí đã kéo trước khi thu nhỏ (null = đang ở vị trí mặc định góc phải dưới)
+    let expandedPosition = null;
+
+    // Thu nhỏ: đưa widget về góc dưới bên phải
+    function minimizeWidget() {
+      // Lưu vị trí đã kéo để mở rộng lại đúng chỗ
+      if (widget.style.left) {
+        const rect = widget.getBoundingClientRect();
+        expandedPosition = { left: rect.left, top: rect.top };
+      }
       widget.classList.add("minimized");
-      chrome.storage.local.set({ widgetMinimized: true });
-    });
-    miniIcon.addEventListener("click", () => {
+      // Xóa vị trí inline để CSS đưa widget về góc dưới bên phải
+      widget.style.left = "";
+      widget.style.top = "";
+      widget.style.right = "";
+      widget.style.bottom = "";
+      try {
+        chrome.storage.local.set({ widgetMinimized: true });
+      } catch (err) {
+        // Extension vừa được reload -> context cũ không dùng được, bỏ qua lỗi lưu trạng thái
+      }
+    }
+
+    // Mở rộng lại kích thước và vị trí ban đầu
+    function expandWidget() {
       widget.classList.remove("minimized");
-      chrome.storage.local.set({ widgetMinimized: false });
+      if (expandedPosition) {
+        widget.style.bottom = "auto";
+        widget.style.right = "auto";
+        widget.style.left = `${expandedPosition.left}px`;
+        widget.style.top = `${expandedPosition.top}px`;
+      }
+      try {
+        chrome.storage.local.set({ widgetMinimized: false });
+      } catch (err) {
+        // Extension vừa được reload -> context cũ không dùng được, bỏ qua lỗi lưu trạng thái
+      }
+    }
+
+    btnMinimize.addEventListener("click", (e) => {
+      // Chặn bubble lên widget, tránh handler "click để mở rộng" chạy ngay sau khi thu nhỏ
+      e.stopPropagation();
+      minimizeWidget();
+    });
+
+    // Click vào widget khi đang thu nhỏ -> mở rộng lại
+    widget.addEventListener("click", (e) => {
+      if (!widget.classList.contains("minimized")) return;
+      e.stopPropagation();
+      expandWidget();
     });
 
     // Đóng hoàn toàn chỉ đóng Widget trên tab hiện tại
@@ -815,40 +855,56 @@
       toggleAutoMode();
     });
 
-    // Hỗ trợ kéo thả Widget (Draggable)
-    let isDragging = false;
-    let startX, startY, initialLeft, initialTop;
+    // Hỗ trợ kéo thả toàn bộ Widget (trừ các control tương tác)
+    let dragState = null;
+    const INTERACTIVE_SELECTOR = "button, input, label, select, textarea, a, .ai-widget-btn, .ai-widget-radio, .ai-widget-switch-row";
 
-    header.addEventListener("mousedown", (e) => {
-      if (e.target.tagName === "BUTTON") return;
-      isDragging = true;
-      startX = e.clientX;
-      startY = e.clientY;
+    widget.addEventListener("pointerdown", (e) => {
+      if (widget.classList.contains("minimized")) return;
+      if (e.button !== 0 || e.target.closest(INTERACTIVE_SELECTOR)) return;
+
       const rect = widget.getBoundingClientRect();
-      initialLeft = rect.left;
-      initialTop = rect.top;
+      dragState = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        left: rect.left,
+        top: rect.top
+      };
 
+      // Chuyển sang định vị tuyệt đối theo left/top để kéo mượt
       widget.style.bottom = "auto";
       widget.style.right = "auto";
-      widget.style.left = `${initialLeft}px`;
-      widget.style.top = `${initialTop}px`;
-      header.style.cursor = "grabbing";
+      widget.style.left = `${rect.left}px`;
+      widget.style.top = `${rect.top}px`;
+      widget.classList.add("dragging");
+      widget.setPointerCapture(e.pointerId);
+      e.preventDefault();
     });
 
-    document.addEventListener("mousemove", (e) => {
-      if (!isDragging) return;
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-      widget.style.left = `${Math.max(10, Math.min(window.innerWidth - widget.offsetWidth - 10, initialLeft + dx))}px`;
-      widget.style.top = `${Math.max(10, Math.min(window.innerHeight - widget.offsetHeight - 10, initialTop + dy))}px`;
+    widget.addEventListener("pointermove", (e) => {
+      if (!dragState || e.pointerId !== dragState.pointerId) return;
+
+      const maxLeft = Math.max(0, window.innerWidth - widget.offsetWidth);
+      const maxTop = Math.max(0, window.innerHeight - widget.offsetHeight);
+      const left = Math.min(Math.max(0, dragState.left + e.clientX - dragState.startX), maxLeft);
+      const top = Math.min(Math.max(0, dragState.top + e.clientY - dragState.startY), maxTop);
+
+      widget.style.left = `${left}px`;
+      widget.style.top = `${top}px`;
     });
 
-    document.addEventListener("mouseup", () => {
-      if (isDragging) {
-        isDragging = false;
-        header.style.cursor = "grab";
+    function endDrag(e) {
+      if (!dragState || e.pointerId !== dragState.pointerId) return;
+      if (widget.hasPointerCapture(dragState.pointerId)) {
+        widget.releasePointerCapture(dragState.pointerId);
       }
-    });
+      widget.classList.remove("dragging");
+      dragState = null;
+    }
+
+    widget.addEventListener("pointerup", endDrag);
+    widget.addEventListener("pointercancel", endDrag);
   }
 
   function updateWidgetStatus(state, text) {
