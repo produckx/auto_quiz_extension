@@ -1,16 +1,14 @@
 """
 main.py - Entry point chính của ứng dụng FastAPI cho Duck Quiz Agent
+Backend stateless: không dùng database, chỉ proxy câu hỏi sang LLM.
 """
 
 import logging
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from models import init_db
 from routes.quiz import router as quiz_router
-from routes.config import router as config_router
 
 # Thiết lập logging
 logging.basicConfig(
@@ -20,22 +18,11 @@ logging.basicConfig(
 logger = logging.getLogger("AIQuizBackend")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Quản lý vòng đời ứng dụng: khởi tạo cơ sở dữ liệu khi khởi động"""
-    logger.info("Đang khởi tạo cơ sở dữ liệu SQLite...")
-    init_db()
-    logger.info("Cơ sở dữ liệu đã sẵn sàng.")
-    yield
-    logger.info("Backend đang tắt...")
-
-
 # Khởi tạo FastAPI app
 app = FastAPI(
     title="Duck Quiz Agent Backend",
     description="Backend API hỗ trợ giải câu hỏi trắc nghiệm tự động qua LLM cho Chrome Extension",
-    version="1.0.0",
-    lifespan=lifespan
+    version="1.0.0"
 )
 
 # Cấu hình CORS: Cho phép Chrome Extension và local development truy cập
@@ -60,7 +47,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # Mount các router
 app.include_router(quiz_router)
-app.include_router(config_router)
 
 
 @app.get("/")

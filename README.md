@@ -1,8 +1,8 @@
 # Duck Quiz Agent
 
-Duck Quiz Agent là dự án gồm Chrome Extension Manifest V3 và backend Python FastAPI. Extension thao tác trực tiếp trên tab Chrome/Brave đang mở; backend kết nối tới Ollama local hoặc API tương thích OpenAI như OpenRouter, rồi lưu lịch sử và bộ nhớ câu hỏi–đáp án trong SQLite.
+Duck Quiz Agent là dự án gồm Chrome Extension Manifest V3 và backend Python FastAPI. Extension thao tác trực tiếp trên tab Chrome/Brave đang mở; backend kết nối tới Ollama local hoặc API tương thích OpenAI như OpenRouter. Backend không dùng database: cấu hình AI, lịch sử và cache câu hỏi–đáp án được lưu trong `chrome.storage.local`.
 
-> Chỉ sử dụng trên bài kiểm tra/form mà bạn được phép tự động hóa. AI có thể trả lời sai; hãy kiểm tra lại đáp án trước khi nộp. Tùy chọn tự nộp mặc định tắt để tránh gửi bài ngoài ý muốn.
+> Chỉ sử dụng trên bài kiểm tra/form mà bạn được phép tự động hóa. AI có thể trả lời sai; hãy kiểm tra lại đáp án trước khi nộp.
 
 ## Tính năng
 
@@ -10,9 +10,9 @@ Duck Quiz Agent là dự án gồm Chrome Extension Manifest V3 và backend Pyth
 - Dùng Element Picker để chọn phần tử cha chứa câu hỏi và các đáp án.
 - Gửi câu hỏi tới backend chạy trên máy cục bộ; backend gọi Ollama, OpenRouter hoặc endpoint OpenAI-compatible.
 - Chọn đáp án trên trang và chạy Auto Agent. Hỗ trợ trang có nhiều câu cuộn và trang có nút chuyển tiếp khi cấu trúc website cho phép nhận diện.
-- Có tùy chọn tự chuyển trang, tự nộp bài, trả lời bằng AI hoặc chọn ngẫu nhiên.
-- Lưu lịch sử và cache câu hỏi–đáp án trong SQLite. Khi bật cache, câu hỏi cùng nội dung và lựa chọn có thể được trả lời từ database mà không cần gọi LLM.
-- Cấu hình URL, API key và tên model trong popup Extension.
+- Có tùy chọn tự chuyển trang, trả lời bằng AI hoặc chọn ngẫu nhiên.
+- Lưu lịch sử và cache câu hỏi–đáp án trong `chrome.storage.local`. Khi bật cache, câu hỏi cùng nội dung và lựa chọn có thể được trả lời từ cache mà không cần gọi LLM.
+- Cấu hình URL, API key và tên model trong popup Extension (lưu cục bộ, không gửi vào database).
 
 ## Cấu trúc thư mục
 
@@ -20,16 +20,15 @@ Duck Quiz Agent là dự án gồm Chrome Extension Manifest V3 và backend Pyth
 AI_Quiz/
 ├── backend/
 │   ├── main.py                 # FastAPI app, mặc định cổng 8765
-│   ├── models.py               # SQLAlchemy models và SQLite
 │   ├── llm_client.py           # Client OpenAI-compatible cho LLM
 │   ├── requirements.txt
 │   ├── start.bat               # Khởi động backend trên Windows
 │   └── routes/
-│       ├── config.py           # API cấu hình AI
-│       └── quiz.py             # API trả lời, lịch sử, thống kê, cache
+│       └── quiz.py             # API trả lời câu hỏi (stateless)
 └── extension/
     ├── manifest.json           # Khai báo Chrome Extension Manifest V3
-    ├── background.js           # Gọi backend và điều phối message
+    ├── config.js               # Biến môi trường (BACKEND_URL, giới hạn lịch sử/cache)
+    ├── background.js           # Gọi backend, chrome.storage.local và điều phối message
     ├── content.js              # Đọc trang, Widget, Element Picker và thao tác DOM
     ├── content.css
     ├── popup.html
@@ -70,13 +69,25 @@ cd d:\App\Extension\AI_Quiz\backend
 
 Backend mặc định lắng nghe tại `http://127.0.0.1:8765`. Kiểm tra nhanh bằng cách mở URL này; response mong đợi có `"status": "online"`. Tài liệu API Swagger có tại `http://127.0.0.1:8765/docs`.
 
-SQLite database được tự tạo khi backend khởi động lần đầu tại:
+Backend không tạo database. Toàn bộ dữ liệu của Extension (cấu hình AI, lịch sử, cache) nằm trong `chrome.storage.local` và có thể xóa bằng cách gỡ Extension hoặc xóa dữ liệu Extension trong Chrome.
+
+### Đổi địa chỉ backend
+
+Địa chỉ backend dùng chung được khai báo trong file:
 
 ```text
-backend\data\quiz.db
+extension\config.js
 ```
 
-Dữ liệu lịch sử, cấu hình và cache được lưu cục bộ trong file này. Không xóa file database nếu cần giữ lại dữ liệu.
+```js
+const APP_CONFIG = {
+  BACKEND_URL: "http://127.0.0.1:8765",
+  HISTORY_LIMIT: 500,
+  CACHE_LIMIT: 500
+};
+```
+
+Chrome Extension không hỗ trợ file `.env` khi chạy runtime, nên `config.js` đóng vai trò file biến môi trường tĩnh. Sau khi sửa, vào `chrome://extensions/` bấm **Reload** cho Extension. Nếu đổi host/port, cập nhật đồng thời lệnh chạy backend (hoặc `start.bat`).
 
 ### Dùng Ollama local
 
@@ -121,15 +132,15 @@ Extension không mở trình duyệt riêng và không dùng Playwright/CDP; con
 7. Chọn cách trả lời:
    - **Độ tin cậy cao nhất**: gửi câu hỏi đến LLM để phân tích.
    - **Chọn ngẫu nhiên**: chọn ngẫu nhiên một lựa chọn, không gọi LLM.
-8. Bật **Auto Agent** nếu muốn xử lý nhiều câu. Có thể cấu hình độ trễ, tự Next trang, tự Submit và tái sử dụng Cache.
+8. Bật **Auto Agent** nếu muốn xử lý nhiều câu. Có thể cấu hình độ trễ, tự Next trang và tái sử dụng Cache. Extension không tự bấm nộp bài.
 
 ### Lưu ý về tự động hóa
 
-- Switch **Tự động nộp bài (Submit)** mặc định tắt. Khi bật, Extension có thể kích hoạt nút gửi bài nếu nhận diện được. Hãy giám sát trang và chỉ bật khi bạn chủ động muốn nộp.
-- Nhận diện câu hỏi, nút Next và nút Submit phụ thuộc cấu trúc DOM, ngôn ngữ và thiết kế từng website. Không có selector chung đảm bảo hoạt động trên mọi hệ thống; dùng Element Picker hoặc điều khiển thủ công nếu trang không nhận diện đúng.
+- Extension không có tính năng tự nộp bài; bạn tự bấm nút Gửi/Nộp trên trang khi đã kiểm tra xong.
+- Nhận diện câu hỏi và nút Next phụ thuộc cấu trúc DOM, ngôn ngữ và thiết kế từng website. Không có selector chung đảm bảo hoạt động trên mọi hệ thống; dùng Element Picker hoặc điều khiển thủ công nếu trang không nhận diện đúng.
 - Nút **Chọn Câu Hỏi** là Element Picker để chọn vùng DOM; nó không có nghĩa chỉ chọn text bằng cách bôi đen.
-- Cache chỉ khớp khi nội dung câu hỏi và danh sách lựa chọn sau chuẩn hóa khớp nhau. Lần đầu gặp câu hỏi, backend gọi AI rồi mới lưu đáp án để tái sử dụng.
-- Câu trả lời từ cache là đáp án đã lưu trước đó, không được xác minh độc lập là đúng. Có thể xóa database cache qua API hoặc xóa bản ghi cần thiết trước khi sử dụng lại.
+- Cache chỉ khớp khi nội dung câu hỏi và danh sách lựa chọn sau chuẩn hóa khớp nhau. Lần đầu gặp câu hỏi, backend gọi AI rồi Extension mới lưu đáp án vào `chrome.storage.local` để tái sử dụng.
+- Câu trả lời từ cache là đáp án đã lưu trước đó, không được xác minh độc lập là đúng. Có thể tắt switch **Cache** hoặc xóa dữ liệu Extension để làm mới.
 
 ## API backend chính
 
@@ -138,17 +149,9 @@ Các endpoint đều dùng base URL `http://127.0.0.1:8765`.
 | Method | Endpoint | Mục đích |
 |---|---|---|
 | `GET` | `/` | Kiểm tra backend hoạt động |
-| `GET` | `/api/config` | Đọc cấu hình đang dùng (API key được che) |
-| `POST` | `/api/config` | Lưu cấu hình endpoint/model |
-| `GET` | `/api/config/providers` | Danh sách provider gợi ý cho client |
-| `POST` | `/api/answer` | Trả lời câu hỏi; hỗ trợ `use_cache` và `skip_history` |
-| `GET` | `/api/history` | Lịch sử có phân trang |
-| `DELETE` | `/api/history/{id}` | Xóa một mục lịch sử |
-| `GET` | `/api/stats` | Thống kê lịch sử |
-| `GET` | `/api/cache` | Danh sách cache |
-| `GET` | `/api/cache/stats` | Thống kê cache và số lần tái sử dụng |
-| `DELETE` | `/api/cache/{id}` | Xóa một mục cache |
-| `DELETE` | `/api/cache` | Xóa toàn bộ cache |
+| `POST` | `/api/answer` | Trả lời câu hỏi; nhận kèm `ai_config` từ Extension |
+
+Backend stateless: không có endpoint lưu cấu hình, lịch sử hay cache. Extension quản lý các dữ liệu này trong `chrome.storage.local`.
 
 Chi tiết request/response và thử API trực tiếp tại `http://127.0.0.1:8765/docs`.
 
@@ -173,8 +176,8 @@ Chi tiết request/response và thử API trực tiếp tại `http://127.0.0.1:
 - Dùng **Chọn Câu Hỏi** và chọn phần tử cha chứa cả nội dung câu hỏi lẫn các lựa chọn.
 - Kiểm tra Console của trang và Service Worker của Extension nếu cần xem log kỹ thuật.
 
-### Không tự Next/Submit
+### Không tự Next
 
-- Kiểm tra switch tương ứng đang bật và nút thực tế có label/role phù hợp.
-- Một số trang có nút trong iframe, dùng icon không có label, hoặc yêu cầu xác nhận trước khi gửi; Extension có thể không nhận ra hay không thể tự xử lý bước đó.
+- Kiểm tra switch **Tự động chuyển trang (Next)** đang bật và nút thực tế có label/role phù hợp.
+- Một số trang có nút trong iframe hoặc dùng icon không có label; Extension có thể không nhận ra.
 - Luôn quan sát trang khi chạy Auto Agent; dừng bằng nút **Dừng Auto Agent** nếu hành vi không như mong muốn.

@@ -26,7 +26,6 @@ document.addEventListener("DOMContentLoaded", () => {
   const logTerminal = document.getElementById("logTerminal");
   const btnClearLogs = document.getElementById("btnClearLogs");
   const toggleAutoNextPage = document.getElementById("toggleAutoNextPage");
-  const toggleAutoSubmit = document.getElementById("toggleAutoSubmit");
   const toggleUseCache = document.getElementById("toggleUseCache");
   const answerModeRadios = document.querySelectorAll('input[name="answerMode"]');
 
@@ -37,7 +36,6 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnToggleApiKey = document.getElementById("btnToggleApiKey");
   const aiModelName = document.getElementById("aiModelName");
   const btnTestAI = document.getElementById("btnTestAI");
-  const btnSaveConfig = document.getElementById("btnSaveConfig");
   const savedConfigStatus = document.getElementById("savedConfigStatus");
   const savedConfigDetails = document.getElementById("savedConfigDetails");
 
@@ -108,7 +106,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (response && response.success) {
         backendStatusBadge.className = "status-badge online";
         backendStatusText.innerText = "Online";
-        addLog("Đã kết nối Backend FastAPI thành công (port 8765).", "success");
+        addLog("Đã kết nối Backend FastAPI thành công.", "success");
       } else {
         backendStatusBadge.className = "status-badge offline";
         backendStatusText.innerText = "Offline";
@@ -216,16 +214,15 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   /* ==========================================================================
-     HÀNH VI TỰ ĐỘNG: Toggle Next page / Submit + Answer mode
+     HÀNH VI TỰ ĐỘNG: Toggle Next page + Answer mode
      ========================================================================== */
 
   // Nạp cài đặt hành vi từ storage
   function loadBehaviorSettings() {
     chrome.storage.local.get(
-      ["autoNextPage", "autoSubmit", "answerMode", "useCache"],
+      ["autoNextPage", "answerMode", "useCache"],
       (data) => {
         toggleAutoNextPage.checked = data.autoNextPage !== false;
-        toggleAutoSubmit.checked = data.autoSubmit === true;
         toggleUseCache.checked = data.useCache !== false;
         const mode = data.answerMode === "random" ? "random" : "confidence";
         answerModeRadios.forEach(r => { r.checked = (r.value === mode); });
@@ -237,7 +234,6 @@ document.addEventListener("DOMContentLoaded", () => {
   function pushSettingsToContent() {
     const settings = {
       autoNextPage: toggleAutoNextPage.checked,
-      autoSubmit: toggleAutoSubmit.checked,
       useCache: toggleUseCache.checked,
       answerMode: document.querySelector('input[name="answerMode"]:checked')?.value || "confidence"
     };
@@ -255,15 +251,6 @@ document.addEventListener("DOMContentLoaded", () => {
   toggleAutoNextPage.addEventListener("change", () => {
     pushSettingsToContent();
     addLog(`Tự động chuyển trang: ${toggleAutoNextPage.checked ? "BẬT" : "TẮT"}`, "info");
-  });
-
-  toggleAutoSubmit.addEventListener("change", () => {
-    pushSettingsToContent();
-    if (toggleAutoSubmit.checked) {
-      addLog("CẢNH BÁO: Đã bật tự động nộp bài (Submit).", "warning");
-    } else {
-      addLog("Đã tắt tự động nộp bài.", "info");
-    }
   });
 
   toggleUseCache.addEventListener("change", () => {
@@ -346,11 +333,19 @@ document.addEventListener("DOMContentLoaded", () => {
     return "OpenAI-compatible";
   }
 
+  // Suy ra provider giống backend để gửi kèm khi giải câu hỏi
+  function inferProvider(baseUrl) {
+    const url = (baseUrl || "").toLowerCase();
+    if (url.includes("openrouter.ai")) return "openrouter";
+    if (url.includes("localhost:11434") || url.includes("127.0.0.1:11434")) return "ollama";
+    return "openai_compatible";
+  }
+
   function renderSavedConfig(config) {
     if (!config) {
       savedConfigStatus.className = "config-status-badge not-configured";
       savedConfigStatus.innerText = "Chưa cấu hình";
-      savedConfigDetails.innerText = "Chưa có cấu hình AI được lưu. Nhập URL, API key và tên model rồi bấm Lưu cấu hình.";
+      savedConfigDetails.innerText = "Chưa có cấu hình AI được lưu trong Chrome Storage. Nhập URL, API key và tên model rồi bấm Lưu cấu hình.";
       return;
     }
 
@@ -359,10 +354,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const providerName = inferProviderLabel(url);
     const keyStatus = config.api_key ? "Đã lưu (ẩn)" : "Không dùng API key";
 
-    savedConfigStatus.className = config.is_active === false
-      ? "config-status-badge inactive"
-      : "config-status-badge configured";
-    savedConfigStatus.innerText = config.is_active === false ? "Không hoạt động" : "Đang dùng";
+    savedConfigStatus.className = "config-status-badge configured";
+    savedConfigStatus.innerText = "Đang dùng";
 
     savedConfigDetails.replaceChildren();
     [
@@ -384,60 +377,47 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // Nạp cấu hình AI đang hoạt động từ backend, đồng thời luôn hiển thị trạng thái.
+  // Nạp cấu hình AI đã lưu trong chrome.storage.local
   function loadConfig() {
     savedConfigStatus.className = "config-status-badge loading";
     savedConfigStatus.innerText = "Đang tải...";
-    savedConfigDetails.innerText = "Đang đọc cấu hình đã lưu từ backend.";
 
-    chrome.runtime.sendMessage({ action: "GET_CONFIG" }, (configRes) => {
-      if (chrome.runtime.lastError || !configRes || !configRes.success) {
-        savedConfigStatus.className = "config-status-badge unavailable";
-        savedConfigStatus.innerText = "Backend offline";
-        savedConfigDetails.innerText = configRes?.error || chrome.runtime.lastError?.message || "Không đọc được cấu hình từ backend.";
-        return;
-      }
-
-      const cfg = configRes.data;
+    chrome.storage.local.get(["aiConfig"], (res) => {
+      const cfg = res.aiConfig || null;
       renderSavedConfig(cfg);
-      if (cfg) {
-        aiBaseUrl.value = cfg.base_url || "";
-        aiApiKey.value = cfg.api_key || "";
-        aiModelName.value = cfg.model_name || "";
-      } else {
-        aiBaseUrl.value = "";
-        aiApiKey.value = "";
-        aiModelName.value = "";
-      }
+      aiBaseUrl.value = cfg?.base_url || "";
+      aiApiKey.value = cfg?.api_key || "";
+      aiModelName.value = cfg?.model_name || "";
     });
   }
 
-  // Lưu cấu hình
+  // Lưu cấu hình vào chrome.storage.local (không ghi database backend)
   aiConfigForm.addEventListener("submit", (e) => {
     e.preventDefault();
 
-    const payload = {
-      base_url: aiBaseUrl.value.trim(),
-      api_key: aiApiKey.value.trim(),
-      model_name: aiModelName.value.trim()
-    };
+    const base_url = aiBaseUrl.value.trim();
+    const typedKey = aiApiKey.value.trim();
+    const model_name = aiModelName.value.trim();
+    if (!base_url || !model_name) return;
 
-    btnSaveConfig.disabled = true;
-    btnSaveConfig.innerText = "Đang lưu...";
+    chrome.storage.local.get(["aiConfig"], (res) => {
+      const old = res.aiConfig || {};
+      // Giữ API key cũ nếu người dùng để trống hoặc nhập '***'
+      const api_key = (typedKey && typedKey !== "***") ? typedKey : (old.api_key || "");
 
-    chrome.runtime.sendMessage({ action: "SAVE_CONFIG", payload: payload }, (res) => {
-      btnSaveConfig.disabled = false;
-      btnSaveConfig.innerText = "💾 Lưu cấu hình";
+      const config = {
+        provider: inferProvider(base_url),
+        base_url: base_url.replace(/\/$/, ""),
+        api_key: api_key,
+        model_name: model_name,
+        temperature: old.temperature ?? 0.3,
+        max_tokens: old.max_tokens ?? 512
+      };
 
-      if (res && res.success) {
-        renderSavedConfig(res.data);
-        aiApiKey.value = res.data.api_key || "";
-        addLog("Đã lưu cấu hình AI thành công vào hệ thống!", "success");
-      } else {
-        const err = res?.error || "Lỗi lưu cấu hình.";
-        addLog(`Lỗi lưu cấu hình: ${err}`, "error");
-        alert(`Lỗi: ${err}`);
-      }
+      chrome.storage.local.set({ aiConfig: config }, () => {
+        renderSavedConfig(config);
+        addLog("Đã lưu cấu hình AI vào Chrome Storage!", "success");
+      });
     });
   });
 

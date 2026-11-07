@@ -16,9 +16,8 @@
   // Cấu hình hành vi của Agent
   const agentSettings = {
     autoNextPage: true,        // Tự động chuyển trang khi hết câu
-    autoSubmit: false,         // Tự động bấm nút Gửi/Nộp bài khi hết (mặc định TẮT để tránh nộp nhầm)
     answerMode: "confidence",  // "confidence" = độ tin cậy cao nhất, "random" = chọn ngẫu nhiên
-    useCache: true,            // Dùng lại đáp án đã lưu trong database (câu hỏi trùng)
+    useCache: true,            // Dùng lại đáp án đã lưu trong chrome.storage.local (câu hỏi trùng)
     nextDelay: 2
   };
 
@@ -34,10 +33,9 @@
    */
   function loadAgentSettings(callback) {
     chrome.storage.local.get(
-      ["autoNextPage", "autoSubmit", "answerMode", "useCache", "nextDelay"],
+      ["autoNextPage", "answerMode", "useCache", "nextDelay"],
       (data) => {
         agentSettings.autoNextPage = data.autoNextPage !== false;
-        agentSettings.autoSubmit = data.autoSubmit === true;
         agentSettings.answerMode = data.answerMode === "random" ? "random" : "confidence";
         agentSettings.useCache = data.useCache !== false;
         agentSettings.nextDelay = data.nextDelay || 2;
@@ -708,16 +706,11 @@
           </div>
         </div>
 
-        <!-- Toggle switch: tự Next trang / tự Submit -->
+        <!-- Toggle switch: tự Next trang / cache -->
         <div class="ai-widget-settings">
           <label class="ai-widget-switch-row">
             <span>Tự động chuyển trang (Next)</span>
             <input type="checkbox" id="ai-widget-toggle-nextpage" checked>
-            <span class="ai-widget-switch"></span>
-          </label>
-          <label class="ai-widget-switch-row">
-            <span>Tự động nộp bài (Submit)</span>
-            <input type="checkbox" id="ai-widget-toggle-submit">
             <span class="ai-widget-switch"></span>
           </label>
           <label class="ai-widget-switch-row">
@@ -761,7 +754,6 @@
     const btnAuto = widget.querySelector("#ai-widget-btn-auto");
     const header = widget.querySelector("#ai-widget-drag-handle");
     const toggleNextPage = widget.querySelector("#ai-widget-toggle-nextpage");
-    const toggleSubmit = widget.querySelector("#ai-widget-toggle-submit");
     const toggleCache = widget.querySelector("#ai-widget-toggle-cache");
     const answerModeRadios = widget.querySelectorAll('input[name="ai-answer-mode"]');
 
@@ -788,7 +780,6 @@
     // Đồng bộ UI từ cấu hình đã lưu
     loadAgentSettings(() => {
       toggleNextPage.checked = agentSettings.autoNextPage;
-      toggleSubmit.checked = agentSettings.autoSubmit;
       toggleCache.checked = agentSettings.useCache;
       answerModeRadios.forEach(r => {
         r.checked = (r.value === agentSettings.answerMode);
@@ -799,12 +790,6 @@
     toggleNextPage.addEventListener("change", () => {
       agentSettings.autoNextPage = toggleNextPage.checked;
       chrome.storage.local.set({ autoNextPage: agentSettings.autoNextPage });
-    });
-
-    // Toggle Tự Submit
-    toggleSubmit.addEventListener("change", () => {
-      agentSettings.autoSubmit = toggleSubmit.checked;
-      chrome.storage.local.set({ autoSubmit: agentSettings.autoSubmit });
     });
 
     // Toggle Dùng lại đáp án đã lưu (Cache)
@@ -887,12 +872,10 @@
    */
   function syncWidgetSettingsUI() {
     const toggleNextPage = document.getElementById("ai-widget-toggle-nextpage");
-    const toggleSubmit = document.getElementById("ai-widget-toggle-submit");
     const toggleCache = document.getElementById("ai-widget-toggle-cache");
     const radios = document.querySelectorAll('#ai-quiz-floating-widget input[name="ai-answer-mode"]');
 
     if (toggleNextPage) toggleNextPage.checked = agentSettings.autoNextPage;
-    if (toggleSubmit) toggleSubmit.checked = agentSettings.autoSubmit;
     if (toggleCache) toggleCache.checked = agentSettings.useCache;
     radios.forEach(r => { r.checked = (r.value === agentSettings.answerMode); });
   }
@@ -973,11 +956,11 @@
         }
 
         const data = response.data;
-        const sourceLabel = data.from_cache ? " (từ Database)" : "";
+        const sourceLabel = data.from_cache ? " (từ Cache)" : "";
         updateWidgetStatus("success", `Đã chọn: ${data.answer_key}${sourceLabel}`);
 
         const reasoningText = data.from_cache
-          ? `♻️ Lấy từ database (câu hỏi đã từng giải). ${data.reasoning || ""}`.trim()
+          ? `♻️ Lấy từ cache local (câu hỏi đã từng giải). ${data.reasoning || ""}`.trim()
           : data.reasoning;
         updateWidgetResult(data.answer_key, data.confidence, reasoningText);
 
@@ -1122,24 +1105,6 @@
   }
 
   /**
-   * Kiểm tra trang đã nộp bài thành công chưa (trang "Câu trả lời của bạn đã được ghi lại")
-   */
-  function isFormSubmittedPage() {
-    const bodyText = (document.body?.innerText || "").toLowerCase();
-    const successPhrases = [
-      "câu trả lời của bạn đã được ghi lại",
-      "câu trả lời của bạn đã được gửi",
-      "your response has been recorded",
-      "your responses have been recorded",
-      "cảm ơn bạn đã phản hồi",
-      "thanks for submitting",
-      "form đã được nộp",
-      "bạn đã hoàn thành"
-    ];
-    return successPhrases.some(p => bodyText.includes(p));
-  }
-
-  /**
    * Kiểm tra nút có bị vô hiệu hóa không (hỗ trợ cả aria-disabled của Google Forms)
    */
   function isButtonDisabled(btn) {
@@ -1190,60 +1155,13 @@
   }
 
   /**
-   * Tìm và bấm nút Gửi/Nộp bài (Submit).
-   * Hỗ trợ nhiều ngôn ngữ: Gửi, Nộp bài, Hoàn thành, Kết thúc, Xong, Submit, Done, Finish...
-   */
-  function clickSubmitButton() {
-    const candidates = Array.from(document.querySelectorAll(
-      "button, a, input[type='submit'], input[type='button'], div[role='button'], span[role='button'], [jsname]"
-    ));
-
-    for (const btn of candidates) {
-      if (btn.closest("#ai-quiz-floating-widget")) continue;
-
-      const text = (btn.innerText || btn.value || "").trim().toLowerCase();
-      const ariaLabel = (btn.getAttribute("aria-label") || "").toLowerCase();
-      const title = (btn.getAttribute("title") || "").toLowerCase();
-
-      const isSubmit = matchesSubmitKeyword(text) || matchesSubmitKeyword(ariaLabel) || matchesSubmitKeyword(title);
-
-      if (isSubmit && !isButtonDisabled(btn) && isButtonVisible(btn)) {
-        btn.scrollIntoView({ behavior: "smooth", block: "center" });
-        triggerRealisticClick(btn);
-        console.log("[Duck Quiz Agent] Đã bấm nút nộp bài:", btn, "| text:", text);
-        return true;
-      }
-    }
-
-    // Fallback: một số nền tảng đặt nút submit trong <form> với type=submit
-    const formSubmit = document.querySelector("form button[type='submit'], form input[type='submit']");
-    if (formSubmit && !isButtonDisabled(formSubmit) && isButtonVisible(formSubmit)) {
-      formSubmit.scrollIntoView({ behavior: "smooth", block: "center" });
-      triggerRealisticClick(formSubmit);
-      console.log("[Duck Quiz Agent] Đã bấm nút submit mặc định của form.");
-      return true;
-    }
-
-    console.warn("[Duck Quiz Agent] Không tìm thấy nút nộp bài phù hợp.");
-    return false;
-  }
-
-  /**
    * Vòng lặp giải tự động thông minh:
    * 1. Hỗ trợ dạng trang cuộn (Google Forms nhiều câu cùng 1 trang): Giải câu 1 -> tự cuộn xuống câu 2 -> câu 3...
    * 2. Hỗ trợ dạng 1 câu có nút Next (Quizizz/Canvas): Giải -> bấm Next -> chờ câu mới -> lặp lại.
-   * 3. Tôn trọng cài đặt autoNextPage và autoSubmit của người dùng.
+   * 3. Tôn trọng cài đặt autoNextPage của người dùng.
    */
   async function runAutoLoop() {
     if (!isAutoRunning) return;
-
-    // Nếu trang hiện tại đã là trang "nộp thành công" -> dừng
-    if (isFormSubmittedPage()) {
-      updateWidgetStatus("success", "Bài đã được nộp thành công! 🎉");
-      console.log("[Duck Quiz Agent] Phát hiện trang đã nộp bài thành công, dừng Auto.");
-      toggleAutoMode(false);
-      return;
-    }
 
     // Reload cài đặt mới nhất (tránh dùng cache cũ)
     await new Promise(resolve => loadAgentSettings(resolve));
@@ -1262,17 +1180,6 @@
       window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
       await new Promise(r => setTimeout(r, 600));
 
-      // Nếu bật Auto Submit: ưu tiên bấm nút Gửi/Nộp bài
-      if (agentSettings.autoSubmit) {
-        updateWidgetStatus("idle", "Đang nộp bài...");
-        const submitted = clickSubmitButton();
-        if (submitted) {
-          updateWidgetStatus("success", "Đã nộp bài thành công! 🎉");
-          toggleAutoMode(false);
-          return;
-        }
-      }
-
       // Nếu bật Auto Next Page: tìm nút chuyển trang
       if (agentSettings.autoNextPage) {
         const hasNextPage = clickNextPageButton();
@@ -1286,11 +1193,7 @@
       }
 
       // Không có trang tiếp theo hoặc tắt Auto Next Page -> Kết thúc
-      if (agentSettings.autoSubmit && clickSubmitButton()) {
-        updateWidgetStatus("success", "Đã nộp bài thành công! 🎉");
-      } else {
-        updateWidgetStatus("success", `Hoàn thành ${progressBefore.total}/${progressBefore.total} câu! 🎉`);
-      }
+      updateWidgetStatus("success", `Hoàn thành ${progressBefore.total}/${progressBefore.total} câu! 🎉`);
       console.log("[Duck Quiz Agent] Không còn câu hỏi chưa làm và không có trang tiếp theo. Dừng Auto.");
       toggleAutoMode(false);
       return;
@@ -1329,7 +1232,7 @@
       }
 
       // Đã hết câu trên trang này
-      if (!agentSettings.autoNextPage && !agentSettings.autoSubmit) {
+      if (!agentSettings.autoNextPage) {
         updateWidgetStatus("success", `Hoàn thành ${currentProgress.total}/${currentProgress.total} câu (không chuyển trang).`);
         console.log("[Duck Quiz Agent] Đã tắt tự Next trang, dừng tại đây.");
         toggleAutoMode(false);
@@ -1351,17 +1254,7 @@
         }
       }
 
-      // Không tìm thấy nút chuyển trang -> thử nộp bài (nếu bật)
-      if (agentSettings.autoSubmit) {
-        updateWidgetStatus("idle", "Đang nộp bài...");
-        if (clickSubmitButton()) {
-          updateWidgetStatus("success", "Đã nộp bài thành công! 🎉");
-          toggleAutoMode(false);
-          return;
-        }
-      }
-
-      // Kết thúc
+      // Không tìm thấy nút chuyển trang -> Kết thúc
       updateWidgetStatus("success", `Hoàn thành 100% (${currentProgress.total}/${currentProgress.total} câu)! 🎉`);
       console.log("[Duck Quiz Agent] Đã hoàn thành toàn bộ bài thi trắc nghiệm.");
       toggleAutoMode(false);
@@ -1427,7 +1320,6 @@
         if (typeof message.settings === "object" && message.settings) {
           const s = message.settings;
           if (typeof s.autoNextPage === "boolean") agentSettings.autoNextPage = s.autoNextPage;
-          if (typeof s.autoSubmit === "boolean") agentSettings.autoSubmit = s.autoSubmit;
           if (s.answerMode === "random" || s.answerMode === "confidence") agentSettings.answerMode = s.answerMode;
           if (typeof s.useCache === "boolean") agentSettings.useCache = s.useCache;
           if (typeof s.nextDelay === "number") agentSettings.nextDelay = s.nextDelay;

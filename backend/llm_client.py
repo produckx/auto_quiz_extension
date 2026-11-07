@@ -179,22 +179,3 @@ class LLMClient:
                 return match.group(1)
 
         return "A"  # Mặc định nếu không tìm được
-
-
-def create_llm_client_from_config(config) -> LLMClient:
-    """
-    Tạo LLMClient từ object AIConfig (SQLAlchemy model).
-    
-    Args:
-        config: AIConfig instance từ database
-    Returns:
-        LLMClient đã cấu hình
-    """
-    return LLMClient(
-        provider=config.provider,
-        base_url=config.base_url,
-        api_key=config.api_key or "",
-        model_name=config.model_name,
-        temperature=config.temperature or 0.3,
-        max_tokens=config.max_tokens or 512
-    )
