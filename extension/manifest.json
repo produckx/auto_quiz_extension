@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Duck Quiz Agent - Trợ lý Trắc Nghiệm Tự Động",
+  "version": "1.0.0",
+  "description": "Tự động đọc câu hỏi, giải đáp trắc nghiệm bằng AI (Ollama, OpenRouter, OpenAI) và chọn đáp án trên web.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8765/*",
+    "http://localhost:8765/*",
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "Duck Quiz Agent"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
