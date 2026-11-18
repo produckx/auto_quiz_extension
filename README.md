@@ -1,18 +1,21 @@
 # Duck Quiz Agent
 
-Duck Quiz Agent là dự án gồm Chrome Extension Manifest V3 và backend Python FastAPI. Extension thao tác trực tiếp trên tab Chrome/Brave đang mở; backend kết nối tới Ollama local hoặc API tương thích OpenAI như OpenRouter. Backend không dùng database: cấu hình AI, lịch sử và cache câu hỏi–đáp án được lưu trong `chrome.storage.local`.
+Duck Quiz Agent là dự án gồm Chrome Extension Manifest V3 và backend Python FastAPI. Extension thao tác trực tiếp trên tab Chrome/Brave đang mở; backend kết nối tới Ollama local hoặc API tương thích OpenAI như OpenRouter. Backend **stateless** không dùng database, chỉ đóng vai trò proxy gọi LLM; cấu hình AI được lưu trong `chrome.storage.local`.
 
 > Chỉ sử dụng trên bài kiểm tra/form mà bạn được phép tự động hóa. AI có thể trả lời sai; hãy kiểm tra lại đáp án trước khi nộp.
 
 ## Tính năng
 
 - Đọc nội dung câu hỏi và lựa chọn trên trang; hỗ trợ văn bản, một số ảnh và bảng HTML.
-- Dùng Element Picker để chọn phần tử cha chứa câu hỏi và các đáp án.
+- Dùng **Element Picker** để chọn phần tử cha chứa câu hỏi và các đáp án.
 - Gửi câu hỏi tới backend chạy trên máy cục bộ; backend gọi Ollama, OpenRouter hoặc endpoint OpenAI-compatible.
-- Chọn đáp án trên trang và chạy Auto Agent. Hỗ trợ trang có nhiều câu cuộn và trang có nút chuyển tiếp khi cấu trúc website cho phép nhận diện.
+- Chọn đáp án trên trang và chạy **Auto Agent**. Hỗ trợ trang có nhiều câu cuộn và trang có nút chuyển tiếp khi cấu trúc website cho phép nhận diện.
 - Có tùy chọn tự chuyển trang, trả lời bằng AI hoặc chọn ngẫu nhiên.
-- Lưu lịch sử và cache câu hỏi–đáp án trong `chrome.storage.local`. Khi bật cache, câu hỏi cùng nội dung và lựa chọn có thể được trả lời từ cache mà không cần gọi LLM.
-- Cấu hình URL, API key và tên model trong popup Extension (lưu cục bộ, không gửi vào database).
+- **Widget điều khiển nổi**: thu nhỏ xuống góc dưới bên phải, click vào icon mini để khôi phục vị trí/kích thước ban đầu; kéo thả mượt mà với Pointer Capture.
+- **Hỗ trợ nhiều loại câu hỏi**: radio, checkbox, ô nhập text/textarea/contenteditable, dropdown native `<select>`, dropdown custom dạng button/listbox (Microsoft Forms), đánh giá sao (star rating), date picker.
+- **Element Picker thông minh**: không bỏ qua câu hỏi đã trả lời khi chọn thủ công; khi click ô nhập liệu sẽ chọn được khối câu hỏi cha chứa tiêu đề (không lấy giá trị input làm câu hỏi).
+- Xử lý lỗi LLM trả về `message.content` rỗng/null (fallback qua `reasoning_content`/`reasoning`).
+- Extension **không tự nộp bài**; bạn tự bấm nút Gửi/Nộp trên trang khi đã kiểm tra xong.
 
 ## Cấu trúc thư mục
 
@@ -27,8 +30,8 @@ AI_Quiz/
 │       └── quiz.py             # API trả lời câu hỏi (stateless)
 └── extension/
     ├── manifest.json           # Khai báo Chrome Extension Manifest V3
-    ├── config.js               # Biến môi trường (BACKEND_URL, giới hạn lịch sử/cache)
-    ├── background.js           # Gọi backend, chrome.storage.local và điều phối message
+    ├── config.js               # Biến môi trường tĩnh (BACKEND_URL)
+    ├── background.js           # Gọi backend, chrome.storage.local (chỉ lưu aiConfig) và điều phối message
     ├── content.js              # Đọc trang, Widget, Element Picker và thao tác DOM
     ├── content.css
     ├── popup.html
@@ -69,7 +72,7 @@ cd d:\App\Extension\AI_Quiz\backend
 
 Backend mặc định lắng nghe tại `http://127.0.0.1:8765`. Kiểm tra nhanh bằng cách mở URL này; response mong đợi có `"status": "online"`. Tài liệu API Swagger có tại `http://127.0.0.1:8765/docs`.
 
-Backend không tạo database. Toàn bộ dữ liệu của Extension (cấu hình AI, lịch sử, cache) nằm trong `chrome.storage.local` và có thể xóa bằng cách gỡ Extension hoặc xóa dữ liệu Extension trong Chrome.
+Backend **stateless**: không tạo database, không lưu lịch sử, không cache. Toàn bộ cấu hình AI của Extension nằm trong `chrome.storage.local` và có thể xóa bằng cách gỡ Extension hoặc xóa dữ liệu Extension trong Chrome.
 
 ### Đổi địa chỉ backend
 
@@ -81,9 +84,7 @@ extension\config.js
 
 ```js
 const APP_CONFIG = {
-  BACKEND_URL: "http://127.0.0.1:8765",
-  HISTORY_LIMIT: 500,
-  CACHE_LIMIT: 500
+  BACKEND_URL: "http://127.0.0.1:8765"
 };
 ```
 
@@ -127,20 +128,25 @@ Extension không mở trình duyệt riêng và không dùng Playwright/CDP; con
    - **API Key**: để trống với Ollama nếu không yêu cầu; nhập key cho dịch vụ cần xác thực.
    - **Tên Model**: tên chính xác mà endpoint cung cấp.
 4. Bấm **Lưu cấu hình**. Khung **Cấu hình đang sử dụng** hiển thị trạng thái, URL, loại endpoint được suy ra, model và trạng thái API key (không hiển thị giá trị key).
-5. Có thể bấm **Test kết nối AI** để gửi câu hỏi thử. Request test không lưu vào lịch sử và bỏ qua cache.
+5. Có thể bấm **Test kết nối AI** để gửi câu hỏi thử.
 6. Dùng nút **Chọn Câu Hỏi** rồi click vùng cha chứa câu hỏi và lựa chọn. Nhấn `ESC` để hủy Element Picker.
 7. Chọn cách trả lời:
    - **Độ tin cậy cao nhất**: gửi câu hỏi đến LLM để phân tích.
    - **Chọn ngẫu nhiên**: chọn ngẫu nhiên một lựa chọn, không gọi LLM.
-8. Bật **Auto Agent** nếu muốn xử lý nhiều câu. Có thể cấu hình độ trễ, tự Next trang và tái sử dụng Cache. Extension không tự bấm nộp bài.
+8. Bật **Auto Agent** nếu muốn xử lý nhiều câu. Có thể cấu hình độ trễ, tự Next trang. Extension không tự bấm nộp bài.
+
+### Widget điều khiển
+
+- **Thu nhỏ**: click nút `_` trên header widget → widget thu nhỏ về góc dưới bên phải màn hình.
+- **Mở rộng**: click vào icon mini (🦆) ở góc dưới bên phải → widget khôi phục vị trí và kích thước ban đầu.
+- **Kéo thả**: kéo header widget (thanh tiêu đề) để di chuyển; khi kéo class `.dragging` tắt transition để mượt mà, dùng Pointer Capture.
 
 ### Lưu ý về tự động hóa
 
 - Extension không có tính năng tự nộp bài; bạn tự bấm nút Gửi/Nộp trên trang khi đã kiểm tra xong.
 - Nhận diện câu hỏi và nút Next phụ thuộc cấu trúc DOM, ngôn ngữ và thiết kế từng website. Không có selector chung đảm bảo hoạt động trên mọi hệ thống; dùng Element Picker hoặc điều khiển thủ công nếu trang không nhận diện đúng.
 - Nút **Chọn Câu Hỏi** là Element Picker để chọn vùng DOM; nó không có nghĩa chỉ chọn text bằng cách bôi đen.
-- Cache chỉ khớp khi nội dung câu hỏi và danh sách lựa chọn sau chuẩn hóa khớp nhau. Lần đầu gặp câu hỏi, backend gọi AI rồi Extension mới lưu đáp án vào `chrome.storage.local` để tái sử dụng.
-- Câu trả lời từ cache là đáp án đã lưu trước đó, không được xác minh độc lập là đúng. Có thể tắt switch **Cache** hoặc xóa dữ liệu Extension để làm mới.
+- Nếu extension bị reload (ví dụ cập nhật tại `chrome://extensions/`) mà tab quiz chưa F5, các thao tác lưu `chrome.storage.local` được bọc try/catch để tránh lỗi `Extension context invalidated`.
 
 ## API backend chính
 
@@ -151,7 +157,7 @@ Các endpoint đều dùng base URL `http://127.0.0.1:8765`.
 | `GET` | `/` | Kiểm tra backend hoạt động |
 | `POST` | `/api/answer` | Trả lời câu hỏi; nhận kèm `ai_config` từ Extension |
 
-Backend stateless: không có endpoint lưu cấu hình, lịch sử hay cache. Extension quản lý các dữ liệu này trong `chrome.storage.local`.
+Backend stateless: không có endpoint lưu cấu hình, lịch sử hay cache. Extension chỉ lưu `aiConfig` trong `chrome.storage.local`.
 
 Chi tiết request/response và thử API trực tiếp tại `http://127.0.0.1:8765/docs`.
 
@@ -181,3 +187,13 @@ Chi tiết request/response và thử API trực tiếp tại `http://127.0.0.1:
 - Kiểm tra switch **Tự động chuyển trang (Next)** đang bật và nút thực tế có label/role phù hợp.
 - Một số trang có nút trong iframe hoặc dùng icon không có label; Extension có thể không nhận ra.
 - Luôn quan sát trang khi chạy Auto Agent; dừng bằng nút **Dừng Auto Agent** nếu hành vi không như mong muốn.
+
+### Lỗi `Extension context invalidated` khi minimize widget
+
+- Xảy ra khi extension vừa reload trên trang quản lý extension nhưng tab trang web chưa F5 lại.
+- Đã fix bằng cách bọc `chrome.storage.local.set` trong khối `try/catch`.
+
+### Lỗi click minimize nhưng widget mở lại ngay
+
+- Nguyên nhân: click vào nút `_` bị nổi bọt (bubble) lên widget container, kích hoạt sự kiện click mở rộng của widget thu nhỏ.
+- Đã fix bằng `e.stopPropagation()` trong listener click của `btnMinimize`.
