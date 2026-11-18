@@ -39,10 +39,6 @@
                 <span class="tab-icon">⚙️</span>
                 <span>Cấu hình AI</span>
             </button>
-            <button class="tab-btn" data-tab="tab-history">
-                <span class="tab-icon">📋</span>
-                <span>Lịch sử</span>
-            </button>
         </nav>
 
         <!-- Content Sections -->
@@ -95,17 +91,6 @@
                             <span class="slider"></span>
                         </label>
                     </div>
-                    <div class="switch-row">
-                        <span class="switch-text">Dùng lại đáp án đã lưu (Cache)</span>
-                        <label class="switch">
-                            <input type="checkbox" id="toggleUseCache" checked>
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-                    <!-- <small class="form-tip" style="margin-top: 6px; display: block;">
-            Bật "Nộp bài" sẽ tự bấm nút Gửi/Nộp khi hoàn tất. Hãy chắc chắn trước khi sử dụng.
-            Bật "Cache" giúp câu hỏi trùng lặp được trả lời ngay từ database, không tốn thời gian AI.
-          </small> -->
                 </div>
 
                 <!-- Cấu hình độ trễ Next câu tiếp theo -->
@@ -181,25 +166,6 @@
                             </button>
                         </div>
                     </form>
-                </div>
-            </section>
-
-            <!-- TAB 3: LỊCH SỬ (HISTORY) -->
-            <section class="tab-pane" id="tab-history">
-                <div class="history-controls">
-                    <input type="text" id="historySearchInput" class="form-control search-input"
-                        placeholder="Lọc theo câu hỏi / URL...">
-                    <button class="btn btn-secondary btn-sm" id="btnRefreshHistory">↻ Làm mới</button>
-                </div>
-
-                <div class="history-list" id="historyListContainer">
-                    <div class="history-empty">Đang tải lịch sử...</div>
-                </div>
-
-                <div class="history-pagination" id="historyPagination" style="display: none;">
-                    <button class="btn-sm" id="btnPrevPage" disabled>« Trước</button>
-                    <span class="page-indicator" id="pageIndicator">Trang 1/1</span>
-                    <button class="btn-sm" id="btnNextPage" disabled>Sau »</button>
                 </div>
             </section>
 

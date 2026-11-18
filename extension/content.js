@@ -17,7 +17,6 @@
   const agentSettings = {
     autoNextPage: true,        // Tự động chuyển trang khi hết câu
     answerMode: "confidence",  // "confidence" = độ tin cậy cao nhất, "random" = chọn ngẫu nhiên
-    useCache: true,            // Dùng lại đáp án đã lưu trong chrome.storage.local (câu hỏi trùng)
     nextDelay: 2
   };
 
@@ -33,11 +32,10 @@
    */
   function loadAgentSettings(callback) {
     chrome.storage.local.get(
-      ["autoNextPage", "answerMode", "useCache", "nextDelay"],
+      ["autoNextPage", "answerMode", "nextDelay"],
       (data) => {
         agentSettings.autoNextPage = data.autoNextPage !== false;
         agentSettings.answerMode = data.answerMode === "random" ? "random" : "confidence";
-        agentSettings.useCache = data.useCache !== false;
         agentSettings.nextDelay = data.nextDelay || 2;
         if (typeof callback === "function") callback(agentSettings);
       }
@@ -129,11 +127,197 @@
   }
 
   /**
+   * Kiểm tra phần tử đang hiển thị (có kích thước thực tế)
+   */
+  function isElementVisible(el) {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  /**
+   * Ô nhập có thể dùng để trả lời (loại bỏ ô tìm kiếm / đăng nhập / ẩn)
+   */
+  const ANSWER_FIELD_SELECTOR = 'textarea, input[type="text"], input[type="number"], input:not([type]), [contenteditable]:not([contenteditable="false"])';
+  const QUESTION_BLOCK_SELECTOR = '[data-automation-id="questionItem"], [data-automation-id="questionTitle"]';
+
+  function isUsableField(field) {
+    if (!field || !isElementVisible(field) || field.disabled || field.readOnly) return false;
+    if (field.closest("#ai-quiz-floating-widget")) return false;
+    if (field.closest('[role="search"], form[role="search"], nav, header')) return false;
+
+    // Combobox lịch là control ngày, không phải ô nhập text thông thường
+    if (isDatePickerField(field)) return false;
+
+    const type = (field.getAttribute("type") || "").toLowerCase();
+    const ignoredTypes = ["search", "email", "password", "tel", "url", "hidden", "submit", "button", "reset", "file", "color", "range", "date", "time"];
+    if (ignoredTypes.includes(type)) return false;
+
+    const hint = `${field.getAttribute("placeholder") || ""} ${field.getAttribute("aria-label") || ""}`.toLowerCase();
+    if (/tìm kiếm|tìm |search|đăng nhập|login|username|password/.test(hint)) return false;
+
+    return true;
+  }
+
+  /**
+   * Tìm ô nhập câu trả lời dạng text trong container (input text / textarea / contenteditable)
+   */
+  function findAnswerField(container) {
+    if (!container) return null;
+    if (container.matches('[role="button"][aria-haspopup="listbox"]')) return null;
+
+    const fields = [];
+    // Container có thể chính là ô nhập (khi người dùng chọn bằng Element Picker)
+    if (container.matches && container.matches(ANSWER_FIELD_SELECTOR)) {
+      fields.push(container);
+    }
+    fields.push(...container.querySelectorAll(ANSWER_FIELD_SELECTOR));
+
+    return fields.find(isUsableField) || null;
+  }
+
+  /**
+   * Tìm khối cha gần nhất có nội dung câu hỏi, không chọn input làm container
+   */
+  function findNearestQuestionBlock(field) {
+    const specificBlock = field.closest(QUESTION_BLOCK_SELECTOR);
+    if (!specificBlock && isDatePickerField(field)) {
+      const questionId = field.getAttribute("aria-labelledby")?.match(/QuestionId_[^\s]+/)?.[0];
+      const microsoftQuestion = questionId ? document.querySelector(`[id="${questionId}"]`) : null;
+      if (microsoftQuestion) return microsoftQuestion.closest('[data-automation-id="questionItem"]') || microsoftQuestion;
+    }
+    if (specificBlock?.getAttribute("data-automation-id") === "questionTitle") {
+      return specificBlock.closest('[data-automation-id="questionItem"]') || specificBlock;
+    }
+    if (specificBlock) return specificBlock;
+
+    let el = field.parentElement;
+    let textContainer = null;
+    for (let i = 0; i < 12 && el && el !== document.body; i++) {
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll(`${ANSWER_FIELD_SELECTOR}, select, button`).forEach(control => control.remove());
+      const text = (clone.innerText || "").trim();
+      if (text) {
+        if (!textContainer) textContainer = el;
+        if (el.matches('fieldset, li, tr, .card, [role="listitem"], [class*="question"], [class*="quiz"], [class*="answer"], [class*="item"], [class*="form-group"], [class*="field"]')) {
+          return el;
+        }
+      }
+      el = el.parentElement;
+    }
+    return textContainer;
+  }
+
+  function isDatePickerField(field) {
+    return field?.getAttribute("type") === "date" ||
+      field?.getAttribute("aria-label")?.toLowerCase() === "date picker" ||
+      (field?.getAttribute("role") === "combobox" && field?.getAttribute("aria-haspopup") === "dialog");
+  }
+
+  /**
+   * Fallback: gom các câu hỏi dạng ô nhập / dropdown không có class nhận diện
+   */
+  function findLooseAnswerContainers() {
+    const fields = Array.from(document.querySelectorAll(`${ANSWER_FIELD_SELECTOR}, select, [role="button"][aria-haspopup="listbox"], input[type="date"], [role="combobox"][aria-haspopup="dialog"], [aria-label="Date picker"]`));
+    const containers = new Set();
+
+    fields.forEach(field => {
+      if (isDatePickerField(field)) {
+        if (!isElementVisible(field)) return;
+      } else if (field.matches('[role="button"][aria-haspopup="listbox"]')) {
+        if (!isElementVisible(field)) return;
+      } else if (field.tagName === "SELECT") {
+        if (!isElementVisible(field)) return;
+        // Bỏ qua dropdown điều hướng / tìm kiếm / ngôn ngữ ở header, footer
+        if (field.closest('nav, header, footer, [role="search"], [class*="search"]')) return;
+        const validOptions = Array.from(field.options).filter(o => o.value !== "" && !o.disabled);
+        if (validOptions.length < 2) return;
+      } else if (!isUsableField(field)) {
+        return;
+      }
+
+      const block = findNearestQuestionBlock(field);
+      if (block) containers.add(block);
+    });
+
+    return Array.from(containers);
+  }
+
+  /**
+   * Tìm các phần tử đánh giá sao (star rating) trong container.
+   * Hỗ trợ các thư viện dùng class/aria-label chứa "star"/"sao"/"rating".
+   */
+  function findStarElements(container) {
+    const raw = Array.from(container.querySelectorAll(
+      '[class*="star"], [class*="rating"], [aria-label*="star" i], [aria-label*="sao" i], [title*="star" i], [title*="sao" i]'
+    )).filter(el =>
+      !el.closest("#ai-quiz-floating-widget") &&
+      !el.closest('[data-automation-id="questionTitle"]') &&
+      isElementVisible(el)
+    );
+
+    // Chỉ giữ phần tử lá để tránh đếm trùng phần tử cha chứa phần tử con
+    let leaves = raw.filter(el => !raw.some(other => other !== el && el.contains(other)));
+
+    // Trường hợp chỉ khớp phần tử bao ngoài: lấy các con trực tiếp làm sao
+    if (leaves.length === 1) {
+      const children = Array.from(leaves[0].children).filter(isElementVisible);
+      if (children.length >= 2 && children.length <= 10) {
+        leaves = children;
+      }
+    }
+
+    return (leaves.length >= 2 && leaves.length <= 10) ? leaves : [];
+  }
+
+  /**
+   * Container có chứa điều khiển trả lời hợp lệ không
+   * (radio/checkbox, dropdown, ô nhập text, đánh giá sao)
+   */
+  function isAnswerableContainer(el) {
+    if (el.closest("#ai-quiz-floating-widget")) return false;
+    if (el.matches(ANSWER_FIELD_SELECTOR + ", select")) return false;
+
+    const microsoftDropdown = el.matches('[role="button"][aria-haspopup="listbox"]')
+      ? el
+      : el.querySelector('[role="button"][aria-haspopup="listbox"]');
+    if (microsoftDropdown) return true;
+    if (el.querySelector('[role="combobox"][aria-haspopup="dialog"]')) return true;
+
+    const choices = el.querySelectorAll('input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"]');
+    if (choices.length >= 2) return true;
+
+    const select = el.querySelector("select");
+    if (select) {
+      const validOptions = Array.from(select.options).filter(o => o.value !== "" && !o.disabled);
+      if (validOptions.length >= 2) return true;
+    }
+
+    if (findAnswerField(el)) return true;
+
+    return findStarElements(el).length >= 2;
+  }
+
+  /**
+   * Câu hỏi đã có thể giải được chưa (có lựa chọn hoặc có ô nhập text)
+   */
+  function isSolvableQuestion(question) {
+    return Boolean(question) && (
+      question.controlType === "input" ||
+      question.controlType === "date" ||
+      (question.options && question.options.length > 0)
+    );
+  }
+
+  /**
    * Tìm khối container của tất cả câu hỏi trắc nghiệm trên trang.
    * Lựa chọn bộ selector bao quát và tìm được NHIỀU CÂU HỎI HỢP LỆ NHẤT.
    */
   function findQuestionContainers() {
     const selectors = [
+      // Microsoft Forms
+      '[data-automation-id="questionItem"]',
+      '[aria-label="Date picker"]',
       // Google Forms
       'div[role="listitem"]',
       'div[jsmodel][data-params]',
@@ -157,21 +341,35 @@
     // Tìm bộ selector cho ra số lượng câu hỏi hợp lệ lớn nhất
     for (const sel of selectors) {
       const found = Array.from(document.querySelectorAll(sel));
-      const valid = found.filter(el => {
-        if (el.closest("#ai-quiz-floating-widget")) return false;
-        // Phải chứa ít nhất 2 lựa chọn (radio hoặc checkbox hoặc role="radio")
-        const choices = el.querySelectorAll('input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"]');
-        return choices.length >= 2;
-      });
+      const valid = found.filter(el => isAnswerableContainer(el));
 
       if (valid.length > bestContainers.length) {
         bestContainers = valid;
       }
     }
 
-    // Nếu các class có sẵn tìm được >= 1 câu hỏi, trả về bộ lớn nhất
+    // Microsoft Forms uses custom buttons for dropdowns and date pickers, not native select elements
+    const microsoftQuestions = Array.from(document.querySelectorAll('[data-automation-id="questionItem"]'))
+      .filter(el => isAnswerableContainer(el));
+    microsoftQuestions.forEach(question => {
+      if (!bestContainers.includes(question)) bestContainers.push(question);
+    });
+
+    // Fallback: câu hỏi nhập liệu / dropdown không có class đặc thù
+    const looseContainers = findLooseAnswerContainers();
+
+    // Nếu các class có sẵn tìm được >= 1 câu hỏi, bổ sung thêm câu hỏi nhập liệu
     if (bestContainers.length > 0) {
+      looseContainers.forEach(c => {
+        if (!bestContainers.some(b => b === c || b.contains(c) || c.contains(b))) {
+          bestContainers.push(c);
+        }
+      });
       return bestContainers;
+    }
+
+    if (looseContainers.length > 0) {
+      return looseContainers;
     }
 
     // Fallback thông minh: Gom nhóm từ chính các nút radio/checkbox
@@ -210,6 +408,10 @@
     // 1. Trích xuất text câu hỏi
     let questionText = "";
     const questionTextSelectors = [
+      // Microsoft Forms
+      '[data-automation-id="questionTitle"] [role="heading"]',
+      '[data-automation-id="questionTitle"]',
+      '[aria-label="questionTitle"]',
       // Google Forms tiêu đề câu hỏi đặc thù
       '.M7eMe',
       '[class*="M7eMe"]',
@@ -230,16 +432,24 @@
     let titleEl = null;
     for (const sel of questionTextSelectors) {
       const el = container.querySelector(sel);
-      if (el && el.innerText.trim().length > 3) {
+      const text = (el?.innerText || "").trim();
+      if (el && text.length > 3 && !el.matches(ANSWER_FIELD_SELECTOR) && !el.closest(ANSWER_FIELD_SELECTOR)) {
         titleEl = el;
-        questionText = el.innerText.trim();
+        questionText = text;
         break;
       }
     }
 
-    // Fallback nếu không khớp selector: lấy text trên đầu container
+    // Fallback: lấy text của container nhưng loại phần text do người dùng đã nhập
     if (!questionText) {
-      questionText = container.innerText.split("\n")[0] || "Câu hỏi trắc nghiệm";
+      const clone = container.cloneNode(true);
+      clone.querySelectorAll(`${ANSWER_FIELD_SELECTOR}, [role="button"][aria-haspopup="listbox"], [role="radio"], [role="checkbox"]`).forEach(field => field.remove());
+      const text = (clone.innerText || "").trim();
+      const lines = text.split("\n").map(line => line.trim()).filter(Boolean);
+      questionText = lines.filter(line =>
+        !/^(câu hỏi|question)\s*\d*\s*[:.)-]?$/i.test(line) &&
+        !/^(chọn một|chọn đáp án|select an option|choose one|your answer|câu trả lời của bạn)$/i.test(line)
+      ).join(" ") || "";
     }
 
     // 2. Tìm ảnh trong câu hỏi (nếu có)
@@ -263,8 +473,12 @@
       }
     }
 
-    // 4. Tìm danh sách các lựa chọn (options)
+    // 4. Xác định loại điều khiển trả lời và danh sách lựa chọn
+    let controlType = "choice";
     const optionItems = [];
+    const keyChars = ["A", "B", "C", "D", "E", "F", "G"];
+
+    // 4a. Trắc nghiệm radio / checkbox
     const optionSelectors = [
       // Google Forms
       'div[role="radio"]',
@@ -307,7 +521,6 @@
       }
     }
 
-    const keyChars = ["A", "B", "C", "D", "E", "F", "G"];
     candidateElements.forEach((el, index) => {
       let fullText = getElementText(el);
       let key = keyChars[index] || String(index + 1);
@@ -327,11 +540,98 @@
       });
     });
 
+    // 4b. Dropdown custom (Microsoft Forms)
+    if (optionItems.length === 0) {
+      const dateField = isDatePickerField(container)
+        ? container
+        : container.querySelector('input[type="date"], [role="combobox"][aria-haspopup="dialog"], [aria-label="Date picker"]');
+      if (dateField) {
+        controlType = "date";
+        optionItems.push({ key: "DATE", text: "Ngày cần chọn", element: dateField, value: dateField.value || "" });
+      }
+    }
+
+    // 4b. Dropdown custom (Microsoft Forms)
+    if (optionItems.length === 0) {
+      const dropdown = container.querySelector('[role="button"][aria-haspopup="listbox"]');
+      if (dropdown) {
+        controlType = "custom-select";
+        const wasExpanded = dropdown.getAttribute("aria-expanded") === "true";
+        if (!wasExpanded) {
+          dropdown.click();
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        const listboxId = dropdown.getAttribute("aria-controls");
+        const listbox = listboxId ? document.getElementById(listboxId) : document.querySelector('[role="listbox"]');
+        const dropdownOptions = listbox
+          ? Array.from(listbox.querySelectorAll('[role="option"]')).filter(option => isElementVisible(option))
+          : [];
+
+        dropdownOptions.forEach((opt, index) => {
+          const text = (opt.getAttribute("aria-label") || opt.innerText || "").trim();
+          if (text) optionItems.push({ key: String(index + 1), text, element: dropdown, value: text });
+        });
+
+        if (!wasExpanded) dropdown.click();
+      }
+    }
+
+    // 4c. Dropdown native (<select>)
+    if (optionItems.length === 0) {
+      const selectEl = container.querySelector("select");
+      const selectOptions = selectEl
+        ? Array.from(selectEl.options).filter(o => o.value !== "" && !o.disabled)
+        : [];
+
+      if (selectOptions.length >= 2) {
+        controlType = "select";
+        selectOptions.forEach((opt, index) => {
+          optionItems.push({
+            key: String(index + 1),
+            text: (opt.text || "").trim() || opt.value,
+            value: opt.value,
+            element: selectEl
+          });
+        });
+      }
+    }
+
+    // 4c. Đánh giá sao (star rating)
+    if (optionItems.length === 0) {
+      const stars = findStarElements(container);
+      if (stars.length >= 2) {
+        controlType = "rating";
+        stars.forEach((star, index) => {
+          const label = (star.getAttribute("aria-label") || star.getAttribute("title") || `${index + 1} sao`).trim();
+          optionItems.push({
+            key: String(index + 1),
+            text: label,
+            element: star
+          });
+        });
+      }
+    }
+
+    // 4d. Ô nhập câu trả lời dạng text (tự luận / điền đáp án)
+    let inputField = null;
+    if (optionItems.length === 0) {
+      inputField = findAnswerField(container);
+      if (inputField) {
+        controlType = "input";
+      }
+    }
+
     return {
       container: container,
       questionText: questionText.replace(/\s+/g, " ").trim(),
       questionType: questionType,
+      controlType: controlType,
+      dateField: controlType === "date"
+        ? (isDatePickerField(container) ? container : container.querySelector('input[type="date"], [role="combobox"][aria-haspopup="dialog"], [aria-label="Date picker"]'))
+        : null,
       options: optionItems,
+      inputField: inputField,
       imageBase64: imageBase64
     };
   }
@@ -361,6 +661,26 @@
     const customSelected = container.querySelector('[class*="is-selected"], [class*="selected"], [class*="active"][role="button"]');
     if (customSelected && !customSelected.closest("#ai-quiz-floating-widget")) return true;
 
+    // 5. Ô nhập text đã có nội dung
+    const answerField = findAnswerField(container);
+    if (answerField) {
+      const value = answerField.isContentEditable ? answerField.innerText : answerField.value;
+      if (value && value.trim()) return true;
+    }
+
+    // 6. Dropdown đã chọn giá trị (bỏ qua placeholder rỗng)
+    const select = container.querySelector("select");
+    if (select && select.value) return true;
+    const customSelect = container.querySelector('[role="button"][aria-haspopup="listbox"]');
+    if (customSelect && customSelect.getAttribute("aria-expanded") === "false" &&
+        !/select your answer|chọn câu trả lời/i.test(customSelect.innerText || "")) return true;
+
+    // 7. Đánh giá sao đã được chọn
+    const ratingSelected = container.querySelector(
+      '[class*="star"].active, [class*="star"][class*="selected"], [class*="rating"] [class*="active"], [aria-pressed="true"]'
+    );
+    if (ratingSelected) return true;
+
     return false;
   }
 
@@ -371,20 +691,17 @@
    * Tự động cuộn màn hình (scroll) tới câu hỏi đó.
    */
   async function detectCurrentQuestion() {
-    // 1. Ưu tiên container đã chọn thủ công bằng Element Picker
+    // 1. Ưu tiên đúng vùng người dùng vừa chọn, kể cả khi câu hỏi đã có câu trả lời
     if (pickedContainer && document.body.contains(pickedContainer)) {
-      // Nếu vùng đã chọn đã được trả lời -> bỏ chọn để tránh giải lặp lại
-      if (isContainerAnswered(pickedContainer)) {
-        pickedContainer = null;
-      } else {
-        pickedContainer.scrollIntoView({ behavior: "smooth", block: "center" });
-        const parsedPicked = await parseQuestionContainer(pickedContainer);
-        if (parsedPicked && parsedPicked.options.length > 0) {
-          currentDetectedQuestion = parsedPicked;
-          return parsedPicked;
-        }
-        console.warn("[Duck Quiz Agent] Không tìm thấy đáp án trong vùng đã chọn, chuyển sang tự động dò.");
+      const selectedContainer = pickedContainer;
+      pickedContainer = null;
+      selectedContainer.scrollIntoView({ behavior: "smooth", block: "center" });
+      const parsedPicked = await parseQuestionContainer(selectedContainer);
+      if (parsedPicked && isSolvableQuestion(parsedPicked)) {
+        currentDetectedQuestion = parsedPicked;
+        return parsedPicked;
       }
+      console.warn("[Duck Quiz Agent] Không tìm thấy đáp án trong vùng đã chọn, chuyển sang tự động dò.");
     }
 
     const containers = findQuestionContainers();
@@ -425,7 +742,7 @@
     }
 
     const parsed = await parseQuestionContainer(targetContainer);
-    if (parsed && parsed.options.length > 0) {
+    if (parsed && isSolvableQuestion(parsed)) {
       currentDetectedQuestion = parsed;
       return parsed;
     }
@@ -445,6 +762,8 @@
       stopQuestionPicker();
       return;
     }
+
+    pickedContainer = null;
     isPickingQuestion = true;
     document.body.classList.add("ai-quiz-picking");
 
@@ -483,24 +802,20 @@
       e.preventDefault();
       e.stopPropagation();
 
-      // Ưu tiên tìm cha gần nhất có chứa >= 2 lựa chọn (nếu user click vào text bên trong)
-      let container = el.closest(
-        'div[role="listitem"], fieldset, [class*="question-item"], [class*="QuestionItem"], [class*="question"]'
-      ) || el;
-
-      let found = null;
-      for (let i = 0; i < 8 && container; i++) {
-        const choices = container.querySelectorAll(
-          'input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"]'
-        );
-        if (choices.length >= 2) {
-          found = container;
-          break;
-        }
-        container = container.parentElement;
+      // Bắt đầu từ khối câu hỏi đặc thù gần nhất; nếu không có thì gom lên từ control được click
+      let found = el.closest('[data-automation-id="questionItem"], [data-automation-id="questionTitle"], div[role="listitem"], fieldset, [class*="question-item"], [class*="QuestionItem"], [class*="question"], [class*="quiz"]');
+      if (!found || !isAnswerableContainer(found)) {
+        const fieldSelector = `${ANSWER_FIELD_SELECTOR}, select, [role="button"][aria-haspopup="listbox"], input[type="date"], [role="combobox"][aria-haspopup="dialog"], [aria-label="Date picker"]`;
+        const field = el.matches(fieldSelector) ? el : el.querySelector(fieldSelector);
+        found = field ? findNearestQuestionBlock(field) : null;
       }
 
-      pickedContainer = found || el;
+      // Không dùng trực tiếp input làm container; input không chứa câu hỏi để gửi AI
+      const clickedFieldSelector = `${ANSWER_FIELD_SELECTOR}, select, [role="button"][aria-haspopup="listbox"], input[type="date"], [role="combobox"][aria-haspopup="dialog"], [aria-label="Date picker"]`;
+      pickedContainer = found || (el.matches(clickedFieldSelector) ? findNearestQuestionBlock(el) : el);
+      if (pickedContainer?.getAttribute("data-automation-id") === "questionTitle") {
+        pickedContainer = pickedContainer.closest('[data-automation-id="questionItem"]') || pickedContainer;
+      }
       stopQuestionPicker();
 
       console.log("[Duck Quiz Agent] Đã chọn vùng câu hỏi:", pickedContainer);
@@ -598,23 +913,95 @@
   }
 
   /**
+   * Gán value theo native setter để React/Vue nhận được thay đổi
+   */
+  function setNativeValue(element, value, proto) {
+    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+    if (setter) {
+      setter.call(element, value);
+    } else {
+      element.value = value;
+    }
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  /**
+   * Điền câu trả lời tự luận vào ô nhập text / textarea / contenteditable
+   */
+  function fillTextAnswer(field, answerText) {
+    if (!field || !String(answerText ?? "").trim()) return false;
+
+    field.scrollIntoView({ behavior: "smooth", block: "center" });
+    field.focus();
+
+    if (field.isContentEditable) {
+      field.innerText = answerText;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    } else {
+      const proto = field instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+      setNativeValue(field, answerText, proto);
+    }
+
+    field.dispatchEvent(new Event("blur", { bubbles: true }));
+    field.classList.add("ai-quiz-selected-highlight");
+    return true;
+  }
+
+  /**
    * Chọn đáp án trên trang dựa vào answerKey (A, B, C, D)
    * @param {string} answerKey 
    * @param {object} parsedQuestion 
    */
   function selectAnswer(answerKey, parsedQuestion) {
     const question = parsedQuestion || currentDetectedQuestion;
-    if (!question || !question.options) {
+    if (!question) {
       console.error("[Duck Quiz Agent] Không có thông tin câu hỏi để chọn đáp án.");
       return false;
     }
 
-    const normKey = answerKey.trim().toUpperCase();
+    // Câu trả lời tự luận: điền trực tiếp vào ô nhập
+    if (question.controlType === "input") {
+      return fillTextAnswer(question.inputField, String(answerKey ?? "").trim());
+    }
+
+    if (!question.options || question.options.length === 0) {
+      console.error("[Duck Quiz Agent] Không có thông tin câu hỏi để chọn đáp án.");
+      return false;
+    }
+
+    const normKey = String(answerKey).trim().toUpperCase();
     let targetOption = question.options.find(opt => opt.key.toUpperCase() === normKey);
 
     // Nếu không tìm thấy theo key (A, B, C), thử ánh xạ theo vị trí số (1 -> 0, 2 -> 1, ...)
     if (!targetOption && !isNaN(normKey)) {
       const idx = parseInt(normKey, 10) - 1;
+      if (idx >= 0 && idx < question.options.length) {
+        targetOption = question.options[idx];
+      }
+    }
+
+    // Microsoft Forms dropdown option được render ngoài question item trong portal
+    if (targetOption && question.controlType === "custom-select") {
+      const dropdown = targetOption.element;
+      if (!dropdown.getAttribute("aria-haspopup")) return false;
+      triggerRealisticClick(dropdown);
+      const options = Array.from(document.querySelectorAll('[role="listbox"] [role="option"]'))
+        .filter(option => isElementVisible(option));
+      const selected = options.find(option =>
+        (option.getAttribute("aria-label") || option.innerText || "").trim() === targetOption.value
+      );
+      if (!selected) return false;
+      triggerRealisticClick(selected);
+      dropdown.classList.add("ai-quiz-selected-highlight");
+      return true;
+    }
+
+    // Ngược lại: AI trả chữ cái nhưng option dùng key số (dropdown, đánh giá sao)
+    if (!targetOption && /^[A-Z]$/.test(normKey)) {
+      const idx = normKey.charCodeAt(0) - 65;
       if (idx >= 0 && idx < question.options.length) {
         targetOption = question.options[idx];
       }
@@ -632,6 +1019,14 @@
         question.container.querySelectorAll(".ai-quiz-selected-highlight").forEach(el => {
           el.classList.remove("ai-quiz-selected-highlight");
         });
+      }
+
+      // Dropdown: gán value và phát sự kiện change
+      if (question.controlType === "select") {
+        setNativeValue(targetOption.element, targetOption.value, HTMLSelectElement.prototype);
+        targetOption.element.classList.add("ai-quiz-selected-highlight");
+        console.log(`[Duck Quiz Agent] Đã chọn dropdown [${targetOption.key}]: ${targetOption.text}`);
+        return true;
       }
 
       targetOption.element.classList.add("ai-quiz-selected-highlight");
@@ -713,11 +1108,6 @@
             <input type="checkbox" id="ai-widget-toggle-nextpage" checked>
             <span class="ai-widget-switch"></span>
           </label>
-          <label class="ai-widget-switch-row">
-            <span>Dùng lại đáp án đã lưu (Cache)</span>
-            <input type="checkbox" id="ai-widget-toggle-cache" checked>
-            <span class="ai-widget-switch"></span>
-          </label>
         </div>
 
         <div class="ai-widget-actions">
@@ -752,7 +1142,6 @@
     const btnSolve = widget.querySelector("#ai-widget-btn-solve");
     const btnAuto = widget.querySelector("#ai-widget-btn-auto");
     const toggleNextPage = widget.querySelector("#ai-widget-toggle-nextpage");
-    const toggleCache = widget.querySelector("#ai-widget-toggle-cache");
     const answerModeRadios = widget.querySelectorAll('input[name="ai-answer-mode"]');
 
     // Vị trí đã kéo trước khi thu nhỏ (null = đang ở vị trí mặc định góc phải dưới)
@@ -820,7 +1209,6 @@
     // Đồng bộ UI từ cấu hình đã lưu
     loadAgentSettings(() => {
       toggleNextPage.checked = agentSettings.autoNextPage;
-      toggleCache.checked = agentSettings.useCache;
       answerModeRadios.forEach(r => {
         r.checked = (r.value === agentSettings.answerMode);
       });
@@ -830,13 +1218,6 @@
     toggleNextPage.addEventListener("change", () => {
       agentSettings.autoNextPage = toggleNextPage.checked;
       chrome.storage.local.set({ autoNextPage: agentSettings.autoNextPage });
-    });
-
-    // Toggle Dùng lại đáp án đã lưu (Cache)
-    toggleCache.addEventListener("change", () => {
-      agentSettings.useCache = toggleCache.checked;
-      chrome.storage.local.set({ useCache: agentSettings.useCache });
-      updateWidgetStatus("idle", toggleCache.checked ? "Cache: BẬT" : "Cache: TẮT");
     });
 
     // Radio cách thức trả lời
@@ -928,11 +1309,9 @@
    */
   function syncWidgetSettingsUI() {
     const toggleNextPage = document.getElementById("ai-widget-toggle-nextpage");
-    const toggleCache = document.getElementById("ai-widget-toggle-cache");
     const radios = document.querySelectorAll('#ai-quiz-floating-widget input[name="ai-answer-mode"]');
 
     if (toggleNextPage) toggleNextPage.checked = agentSettings.autoNextPage;
-    if (toggleCache) toggleCache.checked = agentSettings.useCache;
     radios.forEach(r => { r.checked = (r.value === agentSettings.answerMode); });
   }
 
@@ -960,7 +1339,7 @@
     updateWidgetStatus("solving", "Đang phân tích...");
     const questionData = await detectCurrentQuestion();
 
-    if (!questionData || !questionData.options || questionData.options.length === 0) {
+    if (!questionData || !isSolvableQuestion(questionData)) {
       updateWidgetStatus("error", "Không tìm thấy câu hỏi!");
       updateWidgetResult("--", null, "Không xác định được vùng câu hỏi trên màn hình.");
       return { success: false, reason: "No question found" };
@@ -973,15 +1352,27 @@
     }
 
     // CHẾ ĐỘ CHỌN NGẪU NHIÊN: không gọi AI, chọn ngẫu nhiên 1 đáp án
-    if (agentSettings.answerMode === "random") {
+    // (câu hỏi tự luận vẫn phải gọi AI vì không có lựa chọn để chọn ngẫu nhiên)
+    if (questionData.controlType === "date") {
+      updateWidgetStatus("success", "Đã nhận diện Date picker");
+      updateWidgetResult("--", null, "Mở bộ chọn ngày trên biểu mẫu rồi chọn ngày/tháng/năm; giá trị sẽ được lưu vào trường ngày của form.");
+      return { success: true, controlType: "date" };
+    }
+
+    if (agentSettings.answerMode === "random" && questionData.controlType !== "input") {
       const options = questionData.options;
+      if (!options || options.length === 0) {
+        updateWidgetStatus("error", "Không tìm thấy lựa chọn để trả lời.");
+        return { success: false, reason: "No answer options found" };
+      }
       const randomIndex = Math.floor(Math.random() * options.length);
       const randomOption = options[randomIndex];
 
       updateWidgetStatus("success", `Ngẫu nhiên: ${randomOption.key}`);
       updateWidgetResult(randomOption.key, 1.0, `Chế độ chọn ngẫu nhiên (không dùng AI). Chọn đáp án ${randomOption.key}.`);
 
-      selectAnswer(randomOption.key, questionData);
+      const selected = selectAnswer(randomOption.key, questionData);
+      if (!selected) return { success: false, reason: "Could not apply the selected answer" };
 
       const currentProg = getQuestionsProgress();
       updateWidgetProgress(currentProg.answered, currentProg.total);
@@ -997,8 +1388,7 @@
       question_text: questionData.questionText,
       question_type: questionData.questionType,
       options: questionData.options.map(o => ({ key: o.key, text: o.text })),
-      image_base64: questionData.imageBase64,
-      use_cache: agentSettings.useCache
+      image_base64: questionData.imageBase64
     };
 
     return new Promise((resolve) => {
@@ -1012,13 +1402,9 @@
         }
 
         const data = response.data;
-        const sourceLabel = data.from_cache ? " (từ Cache)" : "";
-        updateWidgetStatus("success", `Đã chọn: ${data.answer_key}${sourceLabel}`);
-
-        const reasoningText = data.from_cache
-          ? `♻️ Lấy từ cache local (câu hỏi đã từng giải). ${data.reasoning || ""}`.trim()
-          : data.reasoning;
-        updateWidgetResult(data.answer_key, data.confidence, reasoningText);
+        const displayAnswer = String(data.answer_key ?? "").slice(0, 60);
+        updateWidgetStatus("success", `Đã chọn: ${displayAnswer}`);
+        updateWidgetResult(data.answer_key, data.confidence, data.reasoning);
 
         // Click chọn đáp án trên DOM
         selectAnswer(data.answer_key, questionData);
@@ -1026,7 +1412,7 @@
         const currentProg = getQuestionsProgress();
         updateWidgetProgress(currentProg.answered, currentProg.total);
 
-        resolve({ success: true, answer: data.answer_key, fromCache: Boolean(data.from_cache) });
+        resolve({ success: true, answer: data.answer_key });
       });
     });
   }
@@ -1377,7 +1763,6 @@
           const s = message.settings;
           if (typeof s.autoNextPage === "boolean") agentSettings.autoNextPage = s.autoNextPage;
           if (s.answerMode === "random" || s.answerMode === "confidence") agentSettings.answerMode = s.answerMode;
-          if (typeof s.useCache === "boolean") agentSettings.useCache = s.useCache;
           if (typeof s.nextDelay === "number") agentSettings.nextDelay = s.nextDelay;
           syncWidgetSettingsUI();
         }

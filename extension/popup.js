@@ -39,20 +39,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const savedConfigStatus = document.getElementById("savedConfigStatus");
   const savedConfigDetails = document.getElementById("savedConfigDetails");
 
-  // History Tab
-  const historySearchInput = document.getElementById("historySearchInput");
-  const btnRefreshHistory = document.getElementById("btnRefreshHistory");
-  const historyListContainer = document.getElementById("historyListContainer");
-  const historyPagination = document.getElementById("historyPagination");
-  const btnPrevPage = document.getElementById("btnPrevPage");
-  const btnNextPage = document.getElementById("btnNextPage");
-  const pageIndicator = document.getElementById("pageIndicator");
-
   // Trạng thái cục bộ
   let isAutoRunning = false;
   let activeTab = null;
-  let historyCurrentPage = 1;
-  let historyTotalPages = 1;
 
   /* ==========================================================================
      LOGGING SYSTEM (MINI TERMINAL)
@@ -85,10 +74,8 @@ document.addEventListener("DOMContentLoaded", () => {
       const targetPane = document.getElementById(targetId);
       if (targetPane) targetPane.classList.add("active");
 
-      // Nạp dữ liệu tương ứng khi chuyển tab
-      if (targetId === "tab-history") {
-        loadHistory(1);
-      } else if (targetId === "tab-settings") {
+      // Nạp dữ liệu cấu hình khi chuyển tab
+      if (targetId === "tab-settings") {
         loadConfig();
       }
     });
@@ -219,22 +206,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Nạp cài đặt hành vi từ storage
   function loadBehaviorSettings() {
-    chrome.storage.local.get(
-      ["autoNextPage", "answerMode", "useCache"],
-      (data) => {
-        toggleAutoNextPage.checked = data.autoNextPage !== false;
-        toggleUseCache.checked = data.useCache !== false;
-        const mode = data.answerMode === "random" ? "random" : "confidence";
-        answerModeRadios.forEach(r => { r.checked = (r.value === mode); });
-      }
-    );
+    chrome.storage.local.get(["autoNextPage", "answerMode"], (data) => {
+      toggleAutoNextPage.checked = data.autoNextPage !== false;
+      const mode = data.answerMode === "random" ? "random" : "confidence";
+      answerModeRadios.forEach(r => { r.checked = (r.value === mode); });
+    });
   }
 
   // Đồng bộ cài đặt xuống content script đang mở
   function pushSettingsToContent() {
     const settings = {
       autoNextPage: toggleAutoNextPage.checked,
-      useCache: toggleUseCache.checked,
       answerMode: document.querySelector('input[name="answerMode"]:checked')?.value || "confidence"
     };
 
@@ -251,11 +233,6 @@ document.addEventListener("DOMContentLoaded", () => {
   toggleAutoNextPage.addEventListener("change", () => {
     pushSettingsToContent();
     addLog(`Tự động chuyển trang: ${toggleAutoNextPage.checked ? "BẬT" : "TẮT"}`, "info");
-  });
-
-  toggleUseCache.addEventListener("change", () => {
-    pushSettingsToContent();
-    addLog(`Dùng lại đáp án đã lưu (Cache): ${toggleUseCache.checked ? "BẬT" : "TẮT"}`, "info");
   });
 
   answerModeRadios.forEach(radio => {
@@ -457,114 +434,6 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
   });
-
-  /* ==========================================================================
-     HISTORY TAB: Xem lại danh sách câu hỏi đã giải
-     ========================================================================== */
-
-  function loadHistory(page = 1) {
-    historyListContainer.innerHTML = '<div class="history-empty">Đang tải lịch sử...</div>';
-
-    const payload = {
-      page: page,
-      page_size: 8,
-      url: historySearchInput.value.trim()
-    };
-
-    chrome.runtime.sendMessage({ action: "GET_HISTORY", payload: payload }, (res) => {
-      if (!res || !res.success || !res.data) {
-        historyListContainer.innerHTML = `<div class="history-empty">${res?.error || "Không thể tải lịch sử."}</div>`;
-        return;
-      }
-
-      const data = res.data;
-      historyCurrentPage = data.page;
-      historyTotalPages = data.total_pages;
-
-      renderHistoryItems(data.items);
-      updatePaginationUI();
-    });
-  }
-
-  function renderHistoryItems(items) {
-    if (!items || items.length === 0) {
-      historyListContainer.innerHTML = '<div class="history-empty">Chưa có câu hỏi nào trong lịch sử.</div>';
-      return;
-    }
-
-    historyListContainer.innerHTML = "";
-    items.forEach(item => {
-      const div = document.createElement("div");
-      div.className = "history-item";
-
-      let timeFormatted = "";
-      if (item.created_at) {
-        const d = new Date(item.created_at);
-        timeFormatted = `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")} ${d.getDate()}/${d.getMonth() + 1}`;
-      }
-
-      div.innerHTML = `
-        <div class="history-header">
-          <span class="history-badge">Đáp án: ${item.selected_answer || "--"}</span>
-          <span class="history-time">${timeFormatted}</span>
-        </div>
-        <div class="history-q-text">${escapeHtml(item.question_text)}</div>
-        <div class="history-footer">
-          <span>Model: ${escapeHtml(item.ai_model_used || "N/A")}</span>
-          <button class="btn-text-sm btn-delete-history" data-id="${item.id}" title="Xóa">Xóa</button>
-        </div>
-      `;
-
-      div.querySelector(".btn-delete-history").addEventListener("click", (e) => {
-        e.stopPropagation();
-        deleteHistoryItem(item.id);
-      });
-
-      historyListContainer.appendChild(div);
-    });
-  }
-
-  function deleteHistoryItem(id) {
-    chrome.runtime.sendMessage({ action: "DELETE_HISTORY_ITEM", payload: { id: id } }, (res) => {
-      if (res && res.success) {
-        loadHistory(historyCurrentPage);
-      }
-    });
-  }
-
-  function updatePaginationUI() {
-    if (historyTotalPages > 1) {
-      historyPagination.style.display = "flex";
-      pageIndicator.innerText = `Trang ${historyCurrentPage}/${historyTotalPages}`;
-      btnPrevPage.disabled = historyCurrentPage <= 1;
-      btnNextPage.disabled = historyCurrentPage >= historyTotalPages;
-    } else {
-      historyPagination.style.display = "none";
-    }
-  }
-
-  btnPrevPage.addEventListener("click", () => {
-    if (historyCurrentPage > 1) loadHistory(historyCurrentPage - 1);
-  });
-
-  btnNextPage.addEventListener("click", () => {
-    if (historyCurrentPage < historyTotalPages) loadHistory(historyCurrentPage + 1);
-  });
-
-  btnRefreshHistory.addEventListener("click", () => loadHistory(1));
-
-  let searchDebounce = null;
-  historySearchInput.addEventListener("input", () => {
-    clearTimeout(searchDebounce);
-    searchDebounce = setTimeout(() => {
-      loadHistory(1);
-    }, 400);
-  });
-
-  function escapeHtml(str) {
-    if (!str) return "";
-    return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
 
   // Khởi động
   checkBackendHealth();

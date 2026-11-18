@@ -26,9 +26,25 @@ Quy tắc BẮT BUỘC:
 }
 
 Trong đó:
-- "answer": chính xác là ký tự đáp án (A, B, C, D hoặc 1, 2, 3, 4) - chỉ 1 ký tự
+- "answer": key của lựa chọn đúng nhất, đúng nguyên văn key trong danh sách lựa chọn (ví dụ A, B, C, D hoặc 1, 2, 3)
 - "reasoning": giải thích ngắn gọn bằng tiếng Việt
 - "confidence": độ tự tin từ 0.0 đến 1.0
+"""
+
+# Prompt cho câu hỏi tự luận / điền đáp án (không có lựa chọn)
+SYSTEM_PROMPT_TEXT_ANSWER = """Bạn là trợ lý chuyên trả lời câu hỏi tự luận ngắn và điền đáp án.
+
+Quy tắc BẮT BUỘC:
+1. Đọc câu hỏi và trả lời chính xác, ngắn gọn.
+2. Chỉ trả về đúng nội dung cần điền (số, từ, cụm từ hoặc câu ngắn), không thêm tiền tố như "Đáp án:".
+3. Trả lời bằng đúng ngôn ngữ của câu hỏi.
+4. Trả lời theo đúng định dạng JSON sau, KHÔNG thêm bất kỳ text nào khác:
+
+{
+  "answer": "nội dung cần điền",
+  "reasoning": "Lý do/giải thích ngắn gọn",
+  "confidence": 0.9
+}
 """
 
 
@@ -86,13 +102,18 @@ class LLMClient:
             {answer: str, reasoning: str, confidence: float}
         """
         # Tạo nội dung câu hỏi dạng text
-        options_text = "\n".join([f"{opt['key']}. {opt['text']}" for opt in options])
-        user_text = f"Câu hỏi: {question}\n\nCác lựa chọn:\n{options_text}"
+        if options:
+            options_text = "\n".join([f"{opt['key']}. {opt['text']}" for opt in options])
+            user_text = f"Câu hỏi: {question}\n\nCác lựa chọn:\n{options_text}"
+        else:
+            # Câu hỏi tự luận / điền đáp án: không có lựa chọn
+            user_text = f"Câu hỏi: {question}\n\nHãy trả lời ngắn gọn nội dung cần điền."
         if context:
             user_text = f"Ngữ cảnh: {context}\n\n{user_text}"
 
         # Xây dựng message gửi lên LLM
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        system_prompt = SYSTEM_PROMPT if options else SYSTEM_PROMPT_TEXT_ANSWER
+        messages = [{"role": "system", "content": system_prompt}]
 
         if image_base64:
             # Câu hỏi có hình ảnh: dùng content dạng multipart
@@ -116,9 +137,36 @@ class LLMClient:
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
             )
-            raw_text = response.choices[0].message.content.strip()
-            return self._parse_response(raw_text)
 
+            # Một số endpoint/proxy trả choices rỗng hoặc message.content = None
+            if not getattr(response, "choices", None):
+                raise ValueError("LLM không trả về lựa chọn nào (choices rỗng).")
+
+            choice = response.choices[0]
+            message = choice.message
+            raw_text = (message.content or "").strip()
+
+            # Reasoning model/proxy có thể chỉ trả reasoning_content/reasoning
+            if not raw_text:
+                raw_text = (
+                    getattr(message, "reasoning_content", None)
+                    or getattr(message, "reasoning", None)
+                    or ""
+                ).strip()
+
+            if not raw_text:
+                finish_reason = getattr(choice, "finish_reason", "unknown")
+                logger.error(f"LLM trả về nội dung rỗng (finish_reason={finish_reason}).")
+                raise ValueError(
+                    f"LLM trả về nội dung rỗng (finish_reason={finish_reason}). "
+                    "Kiểm tra model/endpoint hoặc tăng max_tokens."
+                )
+
+            valid_keys = [str(opt["key"]) for opt in options] if options else []
+            return self._parse_response(raw_text, valid_keys)
+
+        except ValueError:
+            raise
         except OpenAIError as e:
             logger.error(f"Lỗi gọi LLM API: {e}")
             raise ValueError(f"Lỗi kết nối LLM: {str(e)}")
@@ -126,23 +174,31 @@ class LLMClient:
             logger.error(f"Lỗi không xác định khi gọi LLM: {e}")
             raise ValueError(f"Lỗi hệ thống: {str(e)}")
 
-    def _parse_response(self, raw_text: str) -> dict:
+    def _parse_response(self, raw_text: str, valid_keys=None) -> dict:
         """
         Phân tích phản hồi từ LLM, trả về dict chuẩn.
-        Có fallback nếu LLM không trả đúng định dạng JSON.
+        - Có valid_keys (trắc nghiệm/dropdown/sao): chuẩn hóa đáp án về đúng key.
+        - Không có valid_keys (tự luận): giữ nguyên nội dung trả lời.
         """
+        valid_keys = [str(k).upper() for k in (valid_keys or [])]
+
         # Thử parse JSON trực tiếp
         try:
             # Tìm JSON block trong response (LLM đôi khi thêm text xung quanh)
             json_match = re.search(r'\{[^{}]+\}', raw_text, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group())
-                answer = str(data.get("answer", "")).strip().upper()
-                # Normalize: lấy ký tự đầu tiên nếu LLM trả "Option A" thay vì "A"
-                if len(answer) > 1:
-                    first_char = answer[0]
-                    if first_char in "ABCD1234":
-                        answer = first_char
+                raw_answer = str(data.get("answer", "")).strip()
+
+                if valid_keys:
+                    answer = raw_answer.upper()
+                    if answer not in valid_keys:
+                        # LLM có thể trả "Option A" thay vì "A" -> lấy ký tự đầu nếu hợp lệ
+                        first_char = answer[:1]
+                        answer = first_char if first_char in valid_keys else answer
+                else:
+                    answer = raw_answer
+
                 return {
                     "answer": answer,
                     "reasoning": str(data.get("reasoning", "")).strip(),
@@ -151,31 +207,48 @@ class LLMClient:
         except (json.JSONDecodeError, ValueError):
             pass
 
-        # Fallback: tìm ký tự đáp án trong text
         logger.warning(f"LLM không trả JSON chuẩn, fallback parse. Raw: {raw_text[:200]}")
-        answer = self._extract_answer_fallback(raw_text)
+
+        # Fallback cho câu hỏi tự luận: dùng nguyên văn phản hồi
+        if not valid_keys:
+            return {
+                "answer": raw_text.strip()[:500],
+                "reasoning": "LLM không trả JSON chuẩn, dùng nguyên văn phản hồi.",
+                "confidence": 0.5
+            }
+
+        # Fallback: tìm ký tự đáp án trong text
+        answer = self._extract_answer_fallback(raw_text, valid_keys)
         return {
             "answer": answer,
             "reasoning": raw_text[:300],  # Lấy phần đầu làm reasoning
             "confidence": 0.5             # Confidence thấp vì parse fallback
         }
 
-    def _extract_answer_fallback(self, text: str) -> str:
+    def _extract_answer_fallback(self, text: str, valid_keys) -> str:
         """
         Tìm đáp án trong text khi không parse được JSON.
-        Ưu tiên tìm pattern như 'Đáp án: A' hoặc 'answer: B'.
+        Ưu tiên pattern như 'Đáp án: A' hoặc 'answer: B'.
         """
         text_upper = text.upper()
 
         # Tìm pattern: "ĐÁP ÁN: A" hoặc "ANSWER: A" hoặc "CHỌN A"
         patterns = [
-            r'(?:ĐÁP ÁN|ANSWER|CHỌN|SELECT|CORRECT)[:\s]+([ABCD1234])',
-            r'"ANSWER"\s*:\s*"([ABCD1234])"',
-            r'\b([ABCD])\b',   # Ký tự đơn A/B/C/D
+            r'(?:ĐÁP ÁN|ANSWER|CHỌN|SELECT|CORRECT)[:\s]+([A-Z0-9]+)',
+            r'"ANSWER"\s*:\s*"([^"]+)"',
         ]
         for pattern in patterns:
             match = re.search(pattern, text_upper)
             if match:
-                return match.group(1)
+                candidate = match.group(1).strip()
+                if candidate in valid_keys:
+                    return candidate
+                if candidate[:1] in valid_keys:
+                    return candidate[:1]
 
-        return "A"  # Mặc định nếu không tìm được
+        # Tìm key xuất hiện đơn lẻ trong text
+        for key in valid_keys:
+            if re.search(rf'(^|[^A-Z0-9]){re.escape(key)}([^A-Z0-9]|$)', text_upper):
+                return key
+
+        return valid_keys[0] if valid_keys else ""
